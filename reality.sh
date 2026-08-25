@@ -8,7 +8,7 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-SCRIPT_VERSION="1.2.2"
+SCRIPT_VERSION="1.2.3"
 CONFIG_DIR="/usr/local/etc/xray"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 CLIENT_FILE="${CONFIG_DIR}/reclient.json"
@@ -855,31 +855,77 @@ change_short_id() {
 }
 
 uninstall_reality() {
+    local auto_yes="${1:-}"
     echo
-    read -r -p "确认卸载 Reality 配置并停止 Xray? (y/N): " confirm
-    [[ "${confirm,,}" == "y" ]] || { echo "已取消"; return 0; }
+    display_yellow "将完全卸载 Reality / Xray（配置、程序、systemd、日志、残留文件）"
+    if [[ "$auto_yes" != "-y" && "$auto_yes" != "--yes" ]]; then
+        read -r -p "确认继续? (y/N): " confirm
+        [[ "${confirm,,}" == "y" || "${confirm,,}" == "yes" ]] || { echo "已取消"; return 0; }
+    fi
 
-    if [[ "$SERVICE_MANAGER" == "systemctl" ]]; then
+    log_info "开始完全卸载 Reality / Xray..."
+
+    # 停止服务
+    if command_exists systemctl; then
         systemctl stop xray.service 2>/dev/null || true
+        systemctl stop 'xray@*' 2>/dev/null || true
         systemctl disable xray.service 2>/dev/null || true
-    else
+        systemctl disable 'xray@*' 2>/dev/null || true
+    elif command_exists service; then
         service xray stop 2>/dev/null || true
     fi
+    pkill -f '/usr/local/bin/xray' 2>/dev/null || true
 
-    rm -f "$CONFIG_FILE" "$CLIENT_FILE" "$STATE_FILE"
-    print_green "已移除 Reality 配置文件"
-
-    read -r -p "是否同时卸载 Xray 程序本身? (y/N): " remove_bin
-    if [[ "${remove_bin,,}" == "y" ]]; then
-        local script_path="/tmp/xray-install.sh"
-        if curl -L --connect-timeout 30 --max-time 120 "https://github.com/XTLS/Xray-install/raw/main/install-release.sh" -o "$script_path"; then
-            bash "$script_path" remove || true
-            rm -f "$script_path"
-        fi
-        print_green "已尝试卸载 Xray"
+    # 官方卸载（含 --purge）
+    local script_path="/tmp/xray-install-remove.sh"
+    if curl -L --connect-timeout 30 --max-time 180 \
+        "https://github.com/XTLS/Xray-install/raw/main/install-release.sh" \
+        -o "$script_path" 2>/dev/null; then
+        chmod +x "$script_path"
+        bash "$script_path" --purge remove 2>/dev/null || bash "$script_path" remove 2>/dev/null || true
+        rm -f "$script_path"
+        print_green "已执行官方 Xray 卸载"
     else
-        print_yellow "已保留 /usr/local/bin/xray"
+        print_yellow "无法下载官方卸载脚本，改为手动清理"
     fi
+
+    # 手动兜底清理（确保干净）
+    rm -rf /usr/local/etc/xray \
+           /usr/local/share/xray \
+           /var/log/xray \
+           /etc/systemd/system/xray.service.d \
+           /etc/systemd/system/xray@.service.d \
+           /tmp/reality_backup_* 2>/dev/null || true
+
+    rm -f /usr/local/bin/xray \
+          /etc/systemd/system/xray.service \
+          /etc/systemd/system/xray@.service \
+          /etc/systemd/system/multi-user.target.wants/xray.service \
+          /var/log/reality_install.log \
+          /tmp/xray-install.sh \
+          /tmp/xray-install-remove.sh \
+          /tmp/xray_config_*.json \
+          /tmp/install-release.sh 2>/dev/null || true
+
+    if command_exists systemctl; then
+        systemctl daemon-reload 2>/dev/null || true
+        systemctl reset-failed xray.service 2>/dev/null || true
+    fi
+
+    # 校验
+    local leftover=0
+    [[ -e /usr/local/bin/xray ]] && leftover=1 && print_yellow "残留: /usr/local/bin/xray"
+    [[ -e /usr/local/etc/xray ]] && leftover=1 && print_yellow "残留: /usr/local/etc/xray"
+    [[ -e /etc/systemd/system/xray.service ]] && leftover=1 && print_yellow "残留: xray.service"
+
+    if [[ $leftover -eq 0 ]]; then
+        print_green "卸载完成：Reality / Xray 已清理干净"
+    else
+        print_yellow "卸载完成，但仍有少量残留，可手动删除上方路径"
+    fi
+
+    # 可选清理当前目录下载的脚本（不影响正在执行的本进程）
+    rm -f ./install-release.sh 2>/dev/null || true
 }
 
 configure_and_start() {
@@ -959,7 +1005,7 @@ start_menu() {
         echo "  5. 更换 UUID"
         echo "  6. 更换 shortId"
         echo "  7. 启用 BBR"
-        echo "  8. 卸载 Reality"
+        echo "  8. 完全卸载 Reality / Xray"
         echo "  0. 退出"
         echo
         local num
@@ -983,7 +1029,16 @@ main() {
     detect_distribution
     detect_package_manager
     check_service_manager
-    # 菜单模式下 Ctrl+C 直接退出，避免误触发安装清理文案过重
+
+    # 支持: bash reality.sh uninstall [-y]
+    case "${1:-}" in
+        uninstall|remove|--uninstall|--remove)
+            trap 'echo; exit 130' INT TERM
+            uninstall_reality "${2:-}"
+            exit 0
+            ;;
+    esac
+
     trap 'echo; exit 130' INT TERM
     start_menu
 }

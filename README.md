@@ -22,7 +22,19 @@ wget -O tcp-wss.sh https://raw.githubusercontent.com/945967063/v2ray-wss/main/tc
 wget --no-cache -O reality.sh https://raw.githubusercontent.com/945967063/v2ray-wss/main/reality.sh && bash reality.sh
 ```
 
-安装后再次运行同一脚本可进入管理菜单：查看链接、二维码、重启、更换 UUID/shortId、启用 BBR、卸载等。
+## 完全卸载 Reality / Xray
+
+```bash
+wget --no-cache -O reality.sh https://raw.githubusercontent.com/945967063/v2ray-wss/main/reality.sh && bash reality.sh uninstall
+```
+
+或通过菜单：
+
+```bash
+wget -O tcp-wss.sh https://raw.githubusercontent.com/945967063/v2ray-wss/main/tcp-wss.sh && bash tcp-wss.sh
+```
+
+选择 `6. 完全卸载 Reality / Xray`。
 
 **便宜VPS推荐：** https://hostalk.net/deals.html
 

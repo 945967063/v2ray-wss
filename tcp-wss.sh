@@ -201,6 +201,10 @@ install_https(){
     wget -O https.sh "${REPO_RAW}/https.sh" && bash https.sh
 }
 
+uninstall_reality(){
+    wget --no-cache -O reality.sh "${REPO_RAW}/reality.sh" && bash reality.sh uninstall
+}
+
 client_v2ray(){
     wslink=$(echo -n "{\"port\":${getPort},\"ps\":\"1024-wss\",\"tls\":\"tls\",\"id\":\"${v2uuid}\",\"aid\":0,\"v\":2,\"host\":\"${domain}\",\"type\":\"none\",\"path\":\"/${v2path}\",\"net\":\"ws\",\"add\":\"${domain}\",\"allowInsecure\":0,\"method\":\"none\",\"peer\":\"${domain}\",\"sni\":\"${domain}\"}" | base64 -w 0)
 
@@ -236,6 +240,7 @@ start_menu(){
     echo " 3. 安装 Reality(xtls-rprx-vision)"
     echo " 4. 安装 Hysteria2"
     echo " 5. 安装 Https正向代理"
+    echo " 6. 完全卸载 Reality / Xray"
     echo " 0. 退出脚本"
     echo
     read -r -p "请输入数字:" num
@@ -258,6 +263,9 @@ start_menu(){
     ;;
     5)
     install_https
+    ;;
+    6)
+    uninstall_reality
     ;;
     0)
     exit 0
