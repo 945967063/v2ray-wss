@@ -2,10 +2,24 @@
 
 简单点讲，没域名的用户可以安装 Reality 和 hy2 代理，有域名的可以安装 V2ray+wss 和 https 正向代理，各取所需。
 
-运行脚本：
+## 一键安装
 
+```bash
+wget -O tcp-wss.sh https://raw.githubusercontent.com/945967063/v2ray-wss/main/tcp-wss.sh && bash tcp-wss.sh
 ```
-wget git.io/tcp-wss.sh && bash tcp-wss.sh
+
+菜单选项：
+
+1. Shadowsocks-rust（落地）
+2. v2ray+ws+tls（需要域名）
+3. Reality（xtls-rprx-vision）
+4. Hysteria2
+5. Https 正向代理
+
+## 单独安装 Reality
+
+```bash
+wget -O reality.sh https://raw.githubusercontent.com/945967063/v2ray-wss/main/reality.sh && bash reality.sh
 ```
 
 **便宜VPS推荐：** https://hostalk.net/deals.html
@@ -16,7 +30,7 @@ wget git.io/tcp-wss.sh && bash tcp-wss.sh
 
 Debian 9, 10, 11, 12, 13
 
-Ubuntu 16.04, 18.04, 20.04, 22.04
+Ubuntu 16.04, 18.04, 20.04, 22.04, 24.04
 
 CentOS 7
 

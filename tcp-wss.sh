@@ -176,20 +176,22 @@ EOF
     clear
 }
 
+REPO_RAW="https://raw.githubusercontent.com/945967063/v2ray-wss/main"
+
 install_ssrust(){
-    wget https://raw.githubusercontent.com/yeahwu/v2ray-wss/main/ss-rust.sh && bash ss-rust.sh
+    wget -O ss-rust.sh "${REPO_RAW}/ss-rust.sh" && bash ss-rust.sh
 }
 
 install_reality(){
-    wget https://raw.githubusercontent.com/yeahwu/v2ray-wss/main/reality.sh && bash reality.sh
+    wget -O reality.sh "${REPO_RAW}/reality.sh" && bash reality.sh
 }
 
 install_hy2(){
-    wget https://raw.githubusercontent.com/yeahwu/v2ray-wss/main/hy2.sh && bash hy2.sh
+    wget -O hy2.sh "${REPO_RAW}/hy2.sh" && bash hy2.sh
 }
 
 install_https(){
-    wget https://raw.githubusercontent.com/yeahwu/v2ray-wss/main/https.sh && bash https.sh
+    wget -O https.sh "${REPO_RAW}/https.sh" && bash https.sh
 }
 
 client_v2ray(){

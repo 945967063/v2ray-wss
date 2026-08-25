@@ -176,6 +176,105 @@ detect_package_manager() {
     log_info "检测到包管理器: $PKG_MANAGER"
 }
 
+# 根据 apt update 报错，临时禁用失效的第三方源（如 Ookla speedtest 等）
+disable_broken_apt_sources() {
+    local update_output="$1"
+    local disabled_count=0
+    local repo_urls=()
+
+    # 提取 "The repository 'URL' does not have a Release file"
+    while IFS= read -r line; do
+        if [[ "$line" =~ The\ repository\ \'([^\']+)\' ]]; then
+            repo_urls+=("${BASH_REMATCH[1]}")
+        fi
+    done <<< "$update_output"
+
+    # 也匹配 Err: 行中的仓库 URL
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^Err:[0-9]+\ +([^[:space:]]+) ]]; then
+            repo_urls+=("${BASH_REMATCH[1]}")
+        fi
+    done <<< "$update_output"
+
+    if [[ ${#repo_urls[@]} -eq 0 ]]; then
+        return 1
+    fi
+
+    local url host keyword
+    for url in "${repo_urls[@]}"; do
+        # 从 URL 提取特征关键字，用于匹配 sources 文件内容
+        host=$(echo "$url" | sed -E 's#https?://([^/]+)/.*#\1#')
+        keyword=$(echo "$url" | sed -E 's#https?://[^/]+/##' | cut -d/ -f1-2)
+        [[ -z "$host" ]] && continue
+
+        local src_file
+        for src_file in /etc/apt/sources.list /etc/apt/sources.list.d/*; do
+            [[ -f "$src_file" ]] || continue
+            # 跳过已禁用或备份的源文件
+            case "$src_file" in
+                *.disabled|*.disabled.*|*.bak|*.save|*.distUpgrade) continue ;;
+            esac
+
+            if grep -qF "$host" "$src_file" 2>/dev/null; then
+                # 优先匹配更具体的路径关键字，避免误伤同域名其他源
+                if [[ -n "$keyword" ]] && ! grep -qF "$keyword" "$src_file" 2>/dev/null; then
+                    continue
+                fi
+                local backup_file="${src_file}.disabled.reality"
+                if mv "$src_file" "$backup_file" 2>/dev/null; then
+                    log_info "已临时禁用失效软件源: $src_file -> $backup_file"
+                    disabled_count=$((disabled_count + 1))
+                fi
+            fi
+        done
+    done
+
+    [[ $disabled_count -gt 0 ]]
+}
+
+# 更新软件包列表（apt 遇到失效第三方源时自动处理并继续）
+update_package_lists() {
+    log_info "更新软件包列表..."
+    local retry_count=0
+    local update_output=""
+    local update_status=0
+    local disabled_once=0
+
+    while [[ $retry_count -lt 3 ]]; do
+        update_output=$(eval "$PKG_UPDATE" 2>&1)
+        update_status=$?
+        echo "$update_output"
+        [[ -n "$LOG_FILE" ]] && echo "$update_output" >> "$LOG_FILE"
+
+        if [[ $update_status -eq 0 ]]; then
+            return 0
+        fi
+
+        # apt: 首次失败时尝试禁用失效第三方源并立即重试
+        if [[ "$PKG_MANAGER" == "apt" && $disabled_once -eq 0 ]]; then
+            if disable_broken_apt_sources "$update_output"; then
+                disabled_once=1
+                log_info "已处理失效软件源，重新更新软件包列表..."
+                continue
+            fi
+        fi
+
+        retry_count=$((retry_count + 1))
+        if [[ $retry_count -lt 3 ]]; then
+            log_info "更新失败，重试 $retry_count/3..."
+            sleep 5
+        fi
+    done
+
+    # apt 主仓库通常仍可用，警告后继续安装依赖
+    if [[ "$PKG_MANAGER" == "apt" ]]; then
+        print_yellow "警告: 软件包列表更新未完全成功（可能存在失效第三方源），将尝试继续安装..."
+        return 0
+    fi
+
+    exit_with_error "更新软件包列表失败"
+}
+
 # 检查服务管理器
 check_service_manager() {
     if command_exists systemctl && systemctl --version >/dev/null 2>&1; then
@@ -288,21 +387,8 @@ install_xray() {
         cp "/usr/local/etc/xray/config.json" "$BACKUP_DIR/config.json.backup"
     fi
     
-    # 更新包列表
-    log_info "更新软件包列表..."
-    local retry_count=0
-    while [[ $retry_count -lt 3 ]]; do
-        if eval "$PKG_UPDATE"; then
-            break
-        fi
-        retry_count=$((retry_count + 1))
-        log_info "更新失败，重试 $retry_count/3..."
-        sleep 5
-    done
-    
-    if [[ $retry_count -eq 3 ]]; then
-        exit_with_error "更新软件包列表失败"
-    fi
+    # 更新包列表（容错失效第三方 apt 源）
+    update_package_lists
     
     # 安装基础依赖
     log_info "安装基础依赖包..."
@@ -324,7 +410,7 @@ install_xray() {
     esac
     
     # 安装包带重试机制
-    retry_count=0
+    local retry_count=0
     while [[ $retry_count -lt 3 ]]; do
         if eval "$PKG_INSTALL $basic_packages"; then
             break
