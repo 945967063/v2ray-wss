@@ -1,203 +1,150 @@
 #!/bin/bash
-# Shadowsocks Rust Installation Script
+# Shadowsocks-rust 安装与管理
 # Author: https://1024.day
 
-# 颜色定义
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
 PLAIN='\033[0m'
 
-# Root权限检查
+SS_DIR="/etc/shadowsocks"
+SS_CONFIG="${SS_DIR}/config.json"
+SS_CLIENT="${SS_DIR}/client.json"
+SS_STATE="${SS_DIR}/ss.conf"
+SS_SERVICE="shadowsocks.service"
+METHOD="aes-128-gcm"
+
+SS_PASSWORD=""
+SS_PORT=""
+IP=""
+
 check_root() {
     if [[ $EUID -ne 0 ]]; then
-        echo -e "${RED}错误: 此脚本必须以root用户身份运行!${PLAIN}" 1>&2
+        echo -e "${RED}错误: 必须以 root 运行${PLAIN}" 1>&2
         exit 1
     fi
 }
 
-# 生成随机密码和端口
+is_installed() {
+    [[ -f "$SS_CONFIG" ]] || [[ -x /usr/local/bin/ssserver ]]
+}
+
+save_state() {
+    mkdir -p "$SS_DIR"
+    cat > "$SS_STATE" <<EOF
+SS_PORT='${SS_PORT}'
+SS_PASSWORD='${SS_PASSWORD}'
+IP='${IP}'
+METHOD='${METHOD}'
+EOF
+    chmod 600 "$SS_STATE"
+}
+
+load_state() {
+    if [[ -f "$SS_STATE" ]]; then
+        # shellcheck source=/dev/null
+        source "$SS_STATE"
+        [[ -n "$SS_PORT" && -n "$SS_PASSWORD" ]] && return 0
+    fi
+    if [[ -f "$SS_CONFIG" ]] && command -v jq &>/dev/null; then
+        SS_PORT=$(jq -r '.server_port' "$SS_CONFIG" 2>/dev/null)
+        SS_PASSWORD=$(jq -r '.password' "$SS_CONFIG" 2>/dev/null)
+        METHOD=$(jq -r '.method // "aes-128-gcm"' "$SS_CONFIG" 2>/dev/null)
+        [[ -n "$SS_PORT" && -n "$SS_PASSWORD" && "$SS_PORT" != "null" ]] && return 0
+    fi
+    return 1
+}
+
 generate_credentials() {
-    # 使用更可靠的方式生成UUID
     if [[ -f /proc/sys/kernel/random/uuid ]]; then
         SS_PASSWORD=$(cat /proc/sys/kernel/random/uuid)
     else
-        SS_PASSWORD=$(uuidgen 2>/dev/null || date +%s%N | md5sum | cut -d ' ' -f1)
+        SS_PASSWORD=$(uuidgen 2>/dev/null || openssl rand -hex 16)
     fi
 
-    echo -e "${YELLOW}请输入端口号 [1-65535]${PLAIN}"
-    echo -e "${YELLOW}默认: 随机端口 (15秒后自动选择随机端口)${PLAIN}"
-    read -t 15 -p "> " SS_PORT
+    echo -e "${YELLOW}请输入端口 [1-65535]，回车随机（15秒）${PLAIN}"
+    read -r -t 15 -p "> " SS_PORT || true
     if [[ -z "$SS_PORT" ]]; then
         SS_PORT=$(shuf -i 10000-65000 -n 1)
-    elif ! [[ "$SS_PORT" =~ ^[0-9]+$ ]] || [[ "$SS_PORT" -lt 1 ]] || [[ "$SS_PORT" -gt 65535 ]]; then
-        echo -e "${YELLOW}输入的端口无效，使用随机端口${PLAIN}"
+    elif ! [[ "$SS_PORT" =~ ^[0-9]+$ ]] || [[ "$SS_PORT" -lt 1 || "$SS_PORT" -gt 65535 ]]; then
+        echo -e "${YELLOW}端口无效，使用随机端口${PLAIN}"
         SS_PORT=$(shuf -i 10000-65000 -n 1)
     fi
 }
 
-# 获取服务器IP地址
 get_server_ip() {
-    echo -e "${CYAN}正在获取服务器IP地址...${PLAIN}"
-    
-    # 尝试多个IP获取方法以增强可靠性
-    IP=""
-    
-    # 方法1: 使用Cloudflare
-    if [[ -z "$IP" ]]; then
-        IP=$(curl -s -4 --max-time 10 http://www.cloudflare.com/cdn-cgi/trace | grep "ip" | awk -F "[=]" '{print $2}' | tr -d '\n')
-    fi
-    
-    # 方法2: 如果IPv4获取失败，尝试IPv6
-    if [[ -z "$IP" ]]; then
-        IP=$(curl -s -6 --max-time 10 http://www.cloudflare.com/cdn-cgi/trace | grep "ip" | awk -F "[=]" '{print $2}' | tr -d '\n')
-    fi
-    
-    # 方法3: 备用方法
-    if [[ -z "$IP" ]]; then
-        IP=$(curl -s -4 --max-time 10 https://api.ipify.org || curl -s -4 --max-time 10 https://ipinfo.io/ip)
-    fi
-
-    # 最后检查是否成功获取IP
-    if [[ -z "$IP" ]]; then
-        echo -e "${RED}无法获取服务器IP地址，请手动检查网络连接${PLAIN}"
-        IP="<未知IP地址>"
-    fi
+    IP=$(curl -s -4 --max-time 10 http://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep "ip=" | awk -F= '{print $2}' | tr -d '\r\n')
+    [[ -z "$IP" ]] && IP=$(curl -s -4 --max-time 10 https://api.ipify.org 2>/dev/null)
+    [[ -z "$IP" ]] && IP=$(curl -s -6 --max-time 10 http://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep "ip=" | awk -F= '{print $2}' | tr -d '\r\n')
+    [[ -z "$IP" ]] && IP="<未知IP>"
 }
 
-# 安装依赖包
 install_dependencies() {
-    echo -e "${CYAN}安装必要的依赖包...${PLAIN}"
-    
-    # 检测包管理器
     if command -v apt-get &>/dev/null; then
         apt-get update -q
-        apt-get install -y -q gzip wget curl unzip xz-utils jq
+        apt-get install -y -q gzip wget curl unzip xz-utils jq openssl
     elif command -v dnf &>/dev/null; then
-        dnf -q update -y
-        dnf -q install -y gzip wget curl unzip xz jq
+        dnf -q install -y gzip wget curl unzip xz jq openssl
     elif command -v yum &>/dev/null; then
-        yum -q update -y
         yum -q install -y epel-release
-        yum -q install -y gzip wget curl unzip xz jq
+        yum -q install -y gzip wget curl unzip xz jq openssl
     else
-        echo -e "${RED}不支持的Linux发行版，请手动安装依赖：gzip wget curl unzip xz-utils/xz jq${PLAIN}"
+        echo -e "${RED}请手动安装: gzip wget curl unzip xz jq${PLAIN}"
         exit 1
     fi
-    
-    echo -e "${GREEN}依赖包安装完成${PLAIN}"
 }
 
-# 确定系统架构
 detect_architecture() {
-    echo -e "${CYAN}检测系统架构...${PLAIN}"
-    
-    ARCH=""
-    UNAME=$(uname -m)
-    
-    case "$UNAME" in
-        i386|i686)
-            ARCH="i686"
-            ;;
-        x86_64|amd64)
-            ARCH="x86_64"
-            ;;
-        armv7l|armv7)
-            ARCH="arm"
-            ;;
-        armv8|aarch64)
-            ARCH="aarch64"
-            ;;
-        *)
-            echo -e "${RED}不支持的架构: $UNAME${PLAIN}"
-            exit 1
-            ;;
+    case "$(uname -m)" in
+        i386|i686) ARCH="i686" ;;
+        x86_64|amd64) ARCH="x86_64" ;;
+        armv7l|armv7) ARCH="arm" ;;
+        armv8|aarch64) ARCH="aarch64" ;;
+        *) echo -e "${RED}不支持的架构${PLAIN}"; exit 1 ;;
     esac
-    
-    echo -e "${GREEN}系统架构: $ARCH${PLAIN}"
 }
 
-# 下载并安装Shadowsocks Rust
 install_shadowsocks() {
-    echo -e "${CYAN}下载Shadowsocks Rust...${PLAIN}"
-    
-    # 获取最新版本
-    LATEST_VERSION=$(wget -qO- https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases | 
-                    jq -r '[.[] | select(.prerelease == false) | select(.draft == false) | .tag_name] | .[0]')
-    
-    if [[ -z "$LATEST_VERSION" ]]; then
-        echo -e "${RED}无法获取最新版本信息，请检查网络连接或者GitHub API限制${PLAIN}"
-        exit 1
-    fi
-    
-    echo -e "${GREEN}最新版本: $LATEST_VERSION${PLAIN}"
-    
-    # 下载文件
-    DOWNLOAD_URL="https://github.com/shadowsocks/shadowsocks-rust/releases/download/${LATEST_VERSION}/shadowsocks-${LATEST_VERSION}.${ARCH}-unknown-linux-gnu.tar.xz"
-    echo -e "${CYAN}正在从 $DOWNLOAD_URL 下载...${PLAIN}"
-    
-    wget --no-check-certificate -q --show-progress -N "$DOWNLOAD_URL"
-    
-    if [[ $? -ne 0 || ! -e "shadowsocks-${LATEST_VERSION}.${ARCH}-unknown-linux-gnu.tar.xz" ]]; then
-        echo -e "${RED}下载失败！尝试备用方法...${PLAIN}"
-        curl -L --progress-bar -o "shadowsocks-${LATEST_VERSION}.${ARCH}-unknown-linux-gnu.tar.xz" "$DOWNLOAD_URL"
-        
-        if [[ $? -ne 0 || ! -e "shadowsocks-${LATEST_VERSION}.${ARCH}-unknown-linux-gnu.tar.xz" ]]; then
-            echo -e "${RED}Shadowsocks Rust 下载失败！请检查网络连接或手动下载${PLAIN}"
-            exit 1
-        fi
-    fi
-    
-    # 解压文件
-    echo -e "${CYAN}解压文件...${PLAIN}"
-    tar -xf "shadowsocks-${LATEST_VERSION}.${ARCH}-unknown-linux-gnu.tar.xz"
-    
-    if [[ ! -e "ssserver" ]]; then
-        echo -e "${RED}解压失败！${PLAIN}"
-        exit 1
-    fi
-    
-    # 安装二进制文件
+    echo -e "${CYAN}下载 Shadowsocks Rust...${PLAIN}"
+    LATEST_VERSION=$(wget -qO- https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases |
+        jq -r '[.[] | select(.prerelease == false) | select(.draft == false) | .tag_name] | .[0]')
+    [[ -z "$LATEST_VERSION" ]] && { echo -e "${RED}无法获取版本${PLAIN}"; exit 1; }
+
+    local pkg="shadowsocks-${LATEST_VERSION}.${ARCH}-unknown-linux-gnu.tar.xz"
+    local url="https://github.com/shadowsocks/shadowsocks-rust/releases/download/${LATEST_VERSION}/${pkg}"
+    wget --no-check-certificate -q --show-progress -N "$url" || curl -L --progress-bar -o "$pkg" "$url"
+    [[ -f "$pkg" ]] || { echo -e "${RED}下载失败${PLAIN}"; exit 1; }
+
+    tar -xf "$pkg"
+    [[ -f ssserver ]] || { echo -e "${RED}解压失败${PLAIN}"; exit 1; }
     chmod +x ssserver
     mv -f ssserver /usr/local/bin/
-    
-    # 清理其他文件
-    rm -f "shadowsocks-${LATEST_VERSION}.${ARCH}-unknown-linux-gnu.tar.xz"
-    rm -f sslocal ssmanager ssservice ssurl 2>/dev/null
-    
-    echo -e "${GREEN}Shadowsocks Rust 安装完成！${PLAIN}"
+    rm -f "$pkg" sslocal ssmanager ssservice ssurl 2>/dev/null
+    echo -e "${GREEN}安装完成${PLAIN}"
 }
 
-# 配置Shadowsocks
-configure_shadowsocks() {
-    echo -e "${CYAN}配置Shadowsocks...${PLAIN}"
-    
-    # 创建配置目录
-    mkdir -p /etc/shadowsocks
-    
-    # 创建配置文件
-    cat > /etc/shadowsocks/config.json << EOF
+write_ss_config() {
+    mkdir -p "$SS_DIR"
+    cat > "$SS_CONFIG" <<EOF
 {
     "server":"::",
     "server_port":$SS_PORT,
     "password":"$SS_PASSWORD",
     "timeout":600,
     "mode":"tcp_and_udp",
-    "method":"aes-128-gcm"
+    "method":"$METHOD"
 }
 EOF
-    
-    # 创建systemd服务文件
-    cat > /etc/systemd/system/shadowsocks.service << EOF
+    chmod 600 "$SS_CONFIG"
+
+    cat > /etc/systemd/system/${SS_SERVICE} <<EOF
 [Unit]
 Description=Shadowsocks Rust Server
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/ssserver -c /etc/shadowsocks/config.json
+ExecStart=/usr/local/bin/ssserver -c ${SS_CONFIG}
 Restart=on-failure
 RestartSec=3s
 LimitNOFILE=65535
@@ -205,68 +152,150 @@ LimitNOFILE=65535
 [Install]
 WantedBy=multi-user.target
 EOF
-    
-    # 重载、启用和启动服务
+
     systemctl daemon-reload
-    systemctl enable shadowsocks.service
-    systemctl restart shadowsocks.service
-    
-    # 清理临时文件
-    rm -f tcp-wss.sh ss-rust.sh 2>/dev/null
-    
-    echo -e "${GREEN}Shadowsocks 配置完成！${PLAIN}"
+    systemctl enable ${SS_SERVICE}
+    systemctl restart ${SS_SERVICE}
 }
 
-# 生成客户端配置
-generate_client_info() {
-    echo -e "${CYAN}生成客户端配置信息...${PLAIN}"
-    
-    # 编码为SS URL
-    SS_LINK=$(echo -n "aes-128-gcm:${SS_PASSWORD}@${IP}:${SS_PORT}" | base64 -w 0)
-    
-    # 检查服务状态
-    SS_STATUS=$(systemctl is-active shadowsocks.service)
-    if [[ "$SS_STATUS" == "active" ]]; then
-        SERVICE_STATUS="${GREEN}运行中${PLAIN}"
-    else
-        SERVICE_STATUS="${RED}未运行${PLAIN}"
-    fi
-    
-    # 显示配置信息
-    clear
-    echo -e "==========================================="
-    echo -e "       ${GREEN}Shadowsocks 安装已经完成${PLAIN}"
-    echo -e "==========================================="
-    echo -e ""
-    echo -e "${CYAN}Shadowsocks 配置参数:${PLAIN}"
-    echo -e "-------------------------------------------"
-    echo -e "${YELLOW}服务器地址:${PLAIN} ${IP}"
-    echo -e "${YELLOW}端口:${PLAIN} ${SS_PORT}"
-    echo -e "${YELLOW}密码:${PLAIN} ${SS_PASSWORD}"
-    echo -e "${YELLOW}加密方式:${PLAIN} aes-128-gcm"
-    echo -e "${YELLOW}传输协议:${PLAIN} tcp+udp"
-    echo -e "-------------------------------------------"
-    echo -e "${YELLOW}服务状态:${PLAIN} ${SERVICE_STATUS}"
-    echo -e ""
-    echo -e "${YELLOW}SS URL:${PLAIN}"
-    echo -e ""
-    echo -e "ss://${SS_LINK}"
-    echo -e ""
-    echo -e "${GREEN}可使用此URL在客户端快速导入配置${PLAIN}"
-    echo -e "==========================================="
+save_client() {
+    local host="$IP"
+    [[ "$IP" == *:* ]] && host="[$IP]"
+    local link
+    link=$(echo -n "${METHOD}:${SS_PASSWORD}@${host}:${SS_PORT}" | base64 -w 0 2>/dev/null || echo -n "${METHOD}:${SS_PASSWORD}@${host}:${SS_PORT}" | base64)
+    SS_LINK="ss://${link}"
+    cat > "$SS_CLIENT" <<EOF
+{
+  "server": "$IP",
+  "port": $SS_PORT,
+  "password": "$SS_PASSWORD",
+  "method": "$METHOD",
+  "shareLink": "$SS_LINK"
+}
+EOF
+    chmod 600 "$SS_CLIENT"
 }
 
-# 主函数
-main() {
-    check_root
+show_config() {
+    load_state || { echo -e "${RED}未找到配置，请先安装${PLAIN}"; return 1; }
+    [[ -z "$IP" || "$IP" == "<未知IP>" ]] && get_server_ip
+    save_client
+    local status
+    status=$(systemctl is-active ${SS_SERVICE} 2>/dev/null || echo unknown)
+    echo
+    echo -e "${GREEN}=========== Shadowsocks 配置 ===========${PLAIN}"
+    echo -e "地址: ${YELLOW}${IP}${PLAIN}"
+    echo -e "端口: ${YELLOW}${SS_PORT}${PLAIN}"
+    echo -e "密码: ${YELLOW}${SS_PASSWORD}${PLAIN}"
+    echo -e "加密: ${YELLOW}${METHOD}${PLAIN}"
+    echo -e "状态: ${YELLOW}${status}${PLAIN}"
+    echo -e "${GREEN}========================================${PLAIN}"
+    echo -e "链接: ${CYAN}${SS_LINK}${PLAIN}"
+    echo -e "配置文件: ${SS_CLIENT}"
+    echo
+}
+
+do_install() {
     generate_credentials
     install_dependencies
     detect_architecture
     install_shadowsocks
-    configure_shadowsocks
     get_server_ip
-    generate_client_info
+    write_ss_config
+    save_state
+    save_client
+    clear
+    echo -e "${GREEN}安装完成${PLAIN}"
+    show_config
 }
 
-# 执行主函数
-main
+do_restart() {
+    systemctl restart ${SS_SERVICE} && echo -e "${GREEN}已重启${PLAIN}" || echo -e "${RED}重启失败${PLAIN}"
+    systemctl status ${SS_SERVICE} --no-pager || true
+}
+
+change_password() {
+    load_state || { echo -e "${RED}未找到配置${PLAIN}"; return 1; }
+    if [[ -f /proc/sys/kernel/random/uuid ]]; then
+        SS_PASSWORD=$(cat /proc/sys/kernel/random/uuid)
+    else
+        SS_PASSWORD=$(openssl rand -hex 16)
+    fi
+    [[ -z "$IP" ]] && get_server_ip
+    write_ss_config
+    save_state
+    save_client
+    echo -e "${GREEN}密码已更换${PLAIN}"
+    show_config
+}
+
+change_port() {
+    load_state || { echo -e "${RED}未找到配置${PLAIN}"; return 1; }
+    read -r -p "新端口 (1-65535): " new_port
+    if ! [[ "$new_port" =~ ^[0-9]+$ ]] || [[ "$new_port" -lt 1 || "$new_port" -gt 65535 ]]; then
+        echo -e "${RED}端口无效${PLAIN}"
+        return 1
+    fi
+    SS_PORT="$new_port"
+    [[ -z "$IP" ]] && get_server_ip
+    write_ss_config
+    save_state
+    save_client
+    echo -e "${GREEN}端口已更换${PLAIN}"
+    show_config
+}
+
+uninstall_ss() {
+    read -r -p "确认完全卸载 Shadowsocks-rust? (y/N): " c
+    [[ "${c,,}" == "y" ]] || { echo "已取消"; return 0; }
+    systemctl stop ${SS_SERVICE} 2>/dev/null || true
+    systemctl disable ${SS_SERVICE} 2>/dev/null || true
+    rm -f /etc/systemd/system/${SS_SERVICE}
+    rm -rf "$SS_DIR"
+    rm -f /usr/local/bin/ssserver /usr/local/bin/sslocal /usr/local/bin/ssmanager /usr/local/bin/ssservice /usr/local/bin/ssurl
+    systemctl daemon-reload 2>/dev/null || true
+    echo -e "${GREEN}已完全卸载 Shadowsocks-rust${PLAIN}"
+}
+
+pause() { echo; read -r -p "按回车返回菜单..." _; }
+
+start_menu() {
+    while true; do
+        clear
+        echo " ================================================== "
+        echo "  Shadowsocks-rust 管理"
+        echo " ================================================== "
+        if is_installed; then
+            echo -e "  状态: ${GREEN}已安装${PLAIN}"
+        else
+            echo -e "  状态: ${YELLOW}未安装${PLAIN}"
+        fi
+        echo
+        echo "  1. 安装 / 重装"
+        echo "  2. 查看配置与链接"
+        echo "  3. 重启服务"
+        echo "  4. 更换密码"
+        echo "  5. 更换端口"
+        echo "  6. 完全卸载"
+        echo "  0. 退出"
+        echo
+        read -r -p "请输入数字: " num
+        case "$num" in
+            1) do_install; pause ;;
+            2) show_config; pause ;;
+            3) do_restart; pause ;;
+            4) change_password; pause ;;
+            5) change_port; pause ;;
+            6) uninstall_ss; pause ;;
+            0) exit 0 ;;
+            *) echo "输入错误"; sleep 1 ;;
+        esac
+    done
+}
+
+check_root
+case "${1:-}" in
+    uninstall|remove) uninstall_ss; exit 0 ;;
+    show|view) show_config; exit 0 ;;
+    *) start_menu ;;
+esac

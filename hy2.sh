@@ -1,5 +1,5 @@
 #!/bin/bash
-# Hysteria2 Installation Script
+# Hysteria2 安装与管理
 # Author: https://1024.day
 
 GREEN="\033[32m"
@@ -8,158 +8,113 @@ YELLOW="\033[33m"
 CYAN="\033[36m"
 RESET="\033[0m"
 
+HY_DIR="/etc/hysteria"
+HY_CONFIG="${HY_DIR}/config.yaml"
+HY_CLIENT="${HY_DIR}/hyclient.json"
+HY_STATE="${HY_DIR}/hy2.conf"
+HY_SERVICE="hysteria-server.service"
+SNI="bing.com"
+
+SERVER_PORT=""
+HYSTERIA_PASSWORD=""
+SERVER_IP=""
+
 if [[ $EUID -ne 0 ]]; then
-    clear
-    echo -e "${RED}Error: This script must be run as root!${RESET}" 1>&2
+    echo -e "${RED}必须以 root 运行${RESET}" 1>&2
     exit 1
 fi
 
-# 检测操作系统类型
-detect_os() {
-    if [ -f /etc/os-release ]; then
-        . /etc/os-release
-        DETECTED_OS=$NAME
-        OS_VERSION=$VERSION_ID
-    elif type lsb_release >/dev/null 2>&1; then
-        DETECTED_OS=$(lsb_release -si)
-        OS_VERSION=$(lsb_release -sr)
-    elif [ -f /etc/lsb-release ]; then
-        . /etc/lsb-release
-        DETECTED_OS=$DISTRIB_ID
-        OS_VERSION=$DISTRIB_RELEASE
-    elif [ -f /etc/debian_version ]; then
-        DETECTED_OS=Debian
-        OS_VERSION=$(cat /etc/debian_version)
-    elif [ -f /etc/SuSe-release ]; then
-        DETECTED_OS=openSUSE
-    elif [ -f /etc/redhat-release ]; then
-        DETECTED_OS=$(cat /etc/redhat-release | awk '{print $1}')
-    else
-        DETECTED_OS=$(uname -s)
-        OS_VERSION=$(uname -r)
-    fi
+is_installed() {
+    [[ -f "$HY_CONFIG" ]] || command -v hysteria &>/dev/null
 }
 
-# 安装必要的包
+save_state() {
+    mkdir -p "$HY_DIR"
+    cat > "$HY_STATE" <<EOF
+SERVER_PORT='${SERVER_PORT}'
+HYSTERIA_PASSWORD='${HYSTERIA_PASSWORD}'
+SERVER_IP='${SERVER_IP}'
+SNI='${SNI}'
+EOF
+    chmod 600 "$HY_STATE"
+}
+
+load_state() {
+    if [[ -f "$HY_STATE" ]]; then
+        # shellcheck source=/dev/null
+        source "$HY_STATE"
+        [[ -n "$SERVER_PORT" && -n "$HYSTERIA_PASSWORD" ]] && return 0
+    fi
+    if [[ -f "$HY_CONFIG" ]]; then
+        SERVER_PORT=$(grep -E '^listen:' "$HY_CONFIG" 2>/dev/null | sed 's/.*://;s/[[:space:]]//g')
+        HYSTERIA_PASSWORD=$(grep -E '^\s*password:' "$HY_CONFIG" 2>/dev/null | awk '{print $2}' | tr -d '"')
+        [[ -n "$SERVER_PORT" && -n "$HYSTERIA_PASSWORD" ]] && return 0
+    fi
+    return 1
+}
+
 install_packages() {
-    detect_os
-    
-    echo "检测到操作系统: $DETECTED_OS $OS_VERSION"
-    
-    if command -v apt-get &> /dev/null; then
-        echo "使用 APT 包管理器..."
+    if command -v apt-get &>/dev/null; then
         apt-get update -y
         apt-get install -y curl wget openssl gawk ca-certificates
-    elif command -v yum &> /dev/null; then
-        echo "使用 YUM 包管理器..."
-        yum update -y
+    elif command -v dnf &>/dev/null; then
+        dnf install -y curl wget openssl gawk ca-certificates
+    elif command -v yum &>/dev/null; then
         yum install -y epel-release
         yum install -y curl wget openssl gawk ca-certificates
-    elif command -v dnf &> /dev/null; then
-        echo "使用 DNF 包管理器..."
-        dnf update -y
-        dnf install -y curl wget openssl gawk ca-certificates
-    elif command -v zypper &> /dev/null; then
-        echo "使用 Zypper 包管理器..."
-        zypper refresh
+    elif command -v zypper &>/dev/null; then
         zypper install -y curl wget openssl gawk ca-certificates
-    elif command -v pacman &> /dev/null; then
-        echo "使用 Pacman 包管理器..."
-        pacman -Syu --noconfirm
+    elif command -v pacman &>/dev/null; then
         pacman -S --noconfirm curl wget openssl gawk ca-certificates
     else
-        echo "错误: 未找到支持的包管理器!"
-        echo "请手动安装以下依赖: curl wget openssl gawk ca-certificates"
+        echo -e "${RED}请手动安装依赖${RESET}"
         exit 1
     fi
 }
 
-# 检查并启用 systemd 服务
-check_systemd() {
-    if ! command -v systemctl &> /dev/null; then
-        echo "警告: systemctl 未找到，可能不支持 systemd"
-        echo "请手动管理 hysteria 服务"
-        return 1
-    fi
-    return 0
-}
-
-# 生成随机密码
 generate_password() {
-    if [ -f /proc/sys/kernel/random/uuid ]; then
+    if [[ -f /proc/sys/kernel/random/uuid ]]; then
         HYSTERIA_PASSWORD=$(cat /proc/sys/kernel/random/uuid)
     else
         HYSTERIA_PASSWORD=$(openssl rand -hex 16)
     fi
 }
 
-# 获取端口
 get_port() {
-    read -t 15 -p "回车或等待15秒为随机端口，或者自定义端口请输入(1-65535): " SERVER_PORT
-    if [ -z "$SERVER_PORT" ]; then
-        if command -v shuf &> /dev/null; then
-            SERVER_PORT=$(shuf -i 2000-65000 -n 1)
-        else
-            SERVER_PORT=$((RANDOM % 63000 + 2000))
-        fi
+    read -r -t 15 -p "回车随机端口，或输入自定义端口(1-65535): " SERVER_PORT || true
+    if [[ -z "$SERVER_PORT" ]]; then
+        SERVER_PORT=$(shuf -i 2000-65000 -n 1 2>/dev/null || echo $((RANDOM % 63000 + 2000)))
     fi
-    
-    if ! [[ "$SERVER_PORT" =~ ^[0-9]+$ ]] || [ "$SERVER_PORT" -lt 1 ] || [ "$SERVER_PORT" -gt 65535 ]; then
-        echo "错误: 端口必须是 1-65535 之间的数字"
+    if ! [[ "$SERVER_PORT" =~ ^[0-9]+$ ]] || [[ "$SERVER_PORT" -lt 1 || "$SERVER_PORT" -gt 65535 ]]; then
+        echo -e "${RED}端口无效${RESET}"
         exit 1
     fi
 }
 
-# 获取服务器IP
 get_server_ip() {
-    local server_ip
-    server_ip=$(curl -s -4 --connect-timeout 10 http://www.cloudflare.com/cdn-cgi/trace | grep "ip" | awk -F "[=]" '{print $2}')
-    if [[ -z "${server_ip}" ]]; then
-        server_ip=$(curl -s -6 --connect-timeout 10 http://www.cloudflare.com/cdn-cgi/trace | grep "ip" | awk -F "[=]" '{print $2}')
-    fi    
-    if [[ -z "${server_ip}" ]]; then
-        server_ip=$(curl -s --connect-timeout 10 ifconfig.me)
-    fi    
-    if [[ -z "${server_ip}" ]]; then
-        server_ip=$(curl -s --connect-timeout 10 ipinfo.io/ip)
-    fi    
-    if [[ -z "${server_ip}" ]]; then
-        echo "错误: 无法获取服务器IP地址"
-        exit 1
-    fi
-    echo "${server_ip}"
+    local ip
+    ip=$(curl -s -4 --connect-timeout 10 http://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep "ip=" | awk -F= '{print $2}')
+    [[ -z "$ip" ]] && ip=$(curl -s -4 --connect-timeout 10 https://api.ipify.org 2>/dev/null)
+    [[ -z "$ip" ]] && ip=$(curl -s -6 --connect-timeout 10 http://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | grep "ip=" | awk -F= '{print $2}')
+    [[ -z "$ip" ]] && { echo -e "${RED}无法获取 IP${RESET}"; return 1; }
+    echo "$ip"
 }
 
-# 安装 Hysteria2
-install_hysteria2() {
-    echo "开始安装依赖包..."
-    install_packages
-    echo "生成随机密码..."
-    generate_password
-    echo "获取端口配置..."
-    get_port
-    echo "下载并安装 Hysteria2..."
-    if ! bash <(curl -fsSL https://get.hy2.sh/); then
-        echo "错误: Hysteria2 安装失败"
-        exit 1
+write_hy_config() {
+    mkdir -p "$HY_DIR"
+    if [[ ! -f /etc/hysteria/server.crt || ! -f /etc/hysteria/server.key ]]; then
+        openssl req -x509 -nodes -newkey ec:<(openssl ecparam -name prime256v1) \
+            -keyout /etc/hysteria/server.key \
+            -out /etc/hysteria/server.crt \
+            -subj "/CN=${SNI}" -days 36500
+        if id hysteria &>/dev/null; then
+            chown hysteria:hysteria /etc/hysteria/server.key /etc/hysteria/server.crt
+        fi
+        chmod 600 /etc/hysteria/server.key
+        chmod 644 /etc/hysteria/server.crt
     fi
-    echo "创建配置目录..."
-    mkdir -p /etc/hysteria/
-    echo "生成SSL证书..."
-    if ! openssl req -x509 -nodes -newkey ec:<(openssl ecparam -name prime256v1) \
-        -keyout /etc/hysteria/server.key \
-        -out /etc/hysteria/server.crt \
-        -subj "/CN=bing.com" -days 36500; then
-        echo "错误: SSL证书生成失败"
-        exit 1
-    fi
-    if id hysteria &> /dev/null; then
-        chown hysteria:hysteria /etc/hysteria/server.key /etc/hysteria/server.crt
-    fi
-    chmod 600 /etc/hysteria/server.key
-    chmod 644 /etc/hysteria/server.crt
-    echo "创建 Hysteria2 配置文件..."
-    cat > /etc/hysteria/config.yaml << EOF
+
+    cat > "$HY_CONFIG" <<EOF
 listen: :$SERVER_PORT
 
 tls:
@@ -169,111 +124,171 @@ tls:
 auth:
   type: password
   password: $HYSTERIA_PASSWORD
-  
+
 masquerade:
   type: proxy
   proxy:
-    url: https://bing.com
+    url: https://${SNI}
     rewriteHost: true
 
 quic:
-  initStreamReceiveWindow: 26843545 
-  maxStreamReceiveWindow: 26843545 
-  initConnReceiveWindow: 67108864 
-  maxConnReceiveWindow: 67108864 
+  initStreamReceiveWindow: 26843545
+  maxStreamReceiveWindow: 26843545
+  initConnReceiveWindow: 67108864
+  maxConnReceiveWindow: 67108864
 EOF
-    echo "启动 Hysteria2 服务..."
-    if check_systemd; then
-        systemctl enable hysteria-server.service
-        systemctl restart hysteria-server.service
-        sleep 2
-    else
-        echo "请手动启动 Hysteria2 服务"
-    fi
-    cat > /etc/hysteria/hyclient.json << EOF
+    chmod 600 "$HY_CONFIG"
+}
+
+save_client() {
+    local host="$SERVER_IP"
+    [[ "$SERVER_IP" == *:* ]] && host="[${SERVER_IP}]"
+    SHARE_LINK="hysteria2://${HYSTERIA_PASSWORD}@${host}:${SERVER_PORT}/?insecure=1&sni=${SNI}#1024-Hysteria2"
+    cat > "$HY_CLIENT" <<EOF
 {
-"server": "$(get_server_ip):${SERVER_PORT}",
-"auth": "${HYSTERIA_PASSWORD}",
-"tls": {
-  "sni": "bing.com",
-  "insecure": true
-},
-"quic": {
-  "initStreamReceiveWindow": 26843545,
-  "maxStreamReceiveWindow": 26843545,
-  "initConnReceiveWindow": 67108864,
-  "maxConnReceiveWindow": 67108864
-}
+  "server": "${SERVER_IP}:${SERVER_PORT}",
+  "auth": "${HYSTERIA_PASSWORD}",
+  "tls": {
+    "sni": "${SNI}",
+    "insecure": true
+  },
+  "shareLink": "${SHARE_LINK}"
 }
 EOF
-    rm -f tcp-wss.sh hy2.sh
-    clear
+    chmod 600 "$HY_CLIENT"
 }
 
-# 服务状态检查
-check_service_status() {
-    echo -e "${CYAN}===== 服务状态 =====${RESET}"
-    if command -v systemctl &> /dev/null; then
-        if systemctl is-active --quiet hysteria-server.service; then
-            echo -e "${GREEN}✓ Hysteria2 服务运行正常${RESET}"
-        else
-            echo -e "${RED}✗ Hysteria2 服务未运行${RESET}"
-        fi
-    else
-        if pgrep -f hysteria &> /dev/null; then
-            echo -e "${GREEN}✓ Hysteria2 进程运行正常${RESET}"
-        else
-            echo -e "${RED}✗ Hysteria2 进程未运行${RESET}"
-        fi
+show_config() {
+    load_state || { echo -e "${RED}未找到配置，请先安装${RESET}"; return 1; }
+    if [[ -z "$SERVER_IP" ]]; then
+        SERVER_IP=$(get_server_ip) || return 1
     fi
-    echo -e "${CYAN}===================${RESET}"
-}
-
-# 输出客户端配置
-show_client_config() {
-    local server_ip
-    server_ip=$(get_server_ip)
-    local connection_link="${HYSTERIA_PASSWORD}@${server_ip}:${SERVER_PORT}/?insecure=1&sni=bing.com#1024-Hysteria2"
-
+    save_client
+    local status="unknown"
+    systemctl is-active --quiet ${HY_SERVICE} 2>/dev/null && status="active" || status="inactive"
     echo
-    echo -e "${GREEN}===== Hysteria2 安装完成 =====${RESET}"
-    echo
-    echo -e "${CYAN}=========== 配置参数 =============${RESET}"
-    echo -e "服务器地址: ${YELLOW}${server_ip}${RESET}"
+    echo -e "${GREEN}=========== Hysteria2 配置 ===========${RESET}"
+    echo -e "地址: ${YELLOW}${SERVER_IP}${RESET}"
     echo -e "端口: ${YELLOW}${SERVER_PORT}${RESET}"
     echo -e "密码: ${YELLOW}${HYSTERIA_PASSWORD}${RESET}"
-    echo -e "SNI: ${YELLOW}bing.com${RESET}"
-    echo -e "传输协议: ${YELLOW}QUIC over TLS${RESET}"
-    echo -e "跳过证书验证: ${YELLOW}true${RESET}"
-    echo -e "${CYAN}==================================${RESET}"
-    echo
-    echo -e "${CYAN}连接链接:${RESET}"
-    echo -e "${GREEN}hysteria2://${connection_link}${RESET}"
-    echo
-    echo -e "客户端配置文件已保存到: ${YELLOW}/etc/hysteria/hyclient.json${RESET}"
-    echo
-    echo -e "${CYAN}注意事项:${RESET}"
-    echo -e "1. 请确保防火墙允许端口 ${YELLOW}${SERVER_PORT}/UDP${RESET} 通过"
-    echo "2. 如使用云服务器，请在安全组中开放对应端口"
-    echo -e "3. 配置文件位置: ${YELLOW}/etc/hysteria/config.yaml${RESET}"
-    echo -e "4. 服务管理命令:"
-    echo -e "   启动: ${GREEN}systemctl start hysteria-server${RESET}"
-    echo -e "   停止: ${GREEN}systemctl stop hysteria-server${RESET}"
-    echo -e "   重启: ${GREEN}systemctl restart hysteria-server${RESET}"
-    echo -e "   状态: ${GREEN}systemctl status hysteria-server${RESET}"
+    echo -e "SNI: ${YELLOW}${SNI}${RESET}"
+    echo -e "状态: ${YELLOW}${status}${RESET}"
+    echo -e "${GREEN}======================================${RESET}"
+    echo -e "链接: ${CYAN}${SHARE_LINK}${RESET}"
+    echo -e "配置: ${HY_CLIENT}"
+    echo -e "请放行 UDP ${SERVER_PORT}"
     echo
 }
 
-# 主函数
-main() {
-    echo "Hysteria2 一键安装脚本"
-    echo "支持的系统: Ubuntu/Debian/CentOS/RHEL/AlmaLinux/Rocky Linux/openSUSE/Arch Linux"
-    echo
-    
-    install_hysteria2
-    show_client_config
-    check_service_status
+do_install() {
+    install_packages
+    generate_password
+    get_port
+    echo "安装 Hysteria2..."
+    if ! bash <(curl -fsSL https://get.hy2.sh/); then
+        echo -e "${RED}Hysteria2 安装失败${RESET}"
+        exit 1
+    fi
+    SERVER_IP=$(get_server_ip) || exit 1
+    write_hy_config
+    systemctl enable ${HY_SERVICE}
+    systemctl restart ${HY_SERVICE}
+    sleep 2
+    save_state
+    save_client
+    clear
+    echo -e "${GREEN}安装完成${RESET}"
+    show_config
+    systemctl status ${HY_SERVICE} --no-pager || true
 }
 
-# 执行主函数
-main
+do_restart() {
+    systemctl restart ${HY_SERVICE} && echo -e "${GREEN}已重启${RESET}" || echo -e "${RED}重启失败${RESET}"
+    systemctl status ${HY_SERVICE} --no-pager || true
+}
+
+change_password() {
+    load_state || { echo -e "${RED}未找到配置${RESET}"; return 1; }
+    generate_password
+    [[ -z "$SERVER_IP" ]] && SERVER_IP=$(get_server_ip)
+    write_hy_config
+    systemctl restart ${HY_SERVICE}
+    save_state
+    save_client
+    echo -e "${GREEN}密码已更换${RESET}"
+    show_config
+}
+
+change_port() {
+    load_state || { echo -e "${RED}未找到配置${RESET}"; return 1; }
+    read -r -p "新端口 (1-65535): " new_port
+    if ! [[ "$new_port" =~ ^[0-9]+$ ]] || [[ "$new_port" -lt 1 || "$new_port" -gt 65535 ]]; then
+        echo -e "${RED}端口无效${RESET}"
+        return 1
+    fi
+    SERVER_PORT="$new_port"
+    [[ -z "$SERVER_IP" ]] && SERVER_IP=$(get_server_ip)
+    write_hy_config
+    systemctl restart ${HY_SERVICE}
+    save_state
+    save_client
+    echo -e "${GREEN}端口已更换${RESET}"
+    show_config
+}
+
+uninstall_hy2() {
+    read -r -p "确认完全卸载 Hysteria2? (y/N): " c
+    [[ "${c,,}" == "y" ]] || { echo "已取消"; return 0; }
+    systemctl stop ${HY_SERVICE} 2>/dev/null || true
+    systemctl disable ${HY_SERVICE} 2>/dev/null || true
+    if [[ -x /usr/local/bin/hysteria ]] || command -v hysteria &>/dev/null; then
+        bash <(curl -fsSL https://get.hy2.sh/) --remove 2>/dev/null || true
+    fi
+    rm -rf "$HY_DIR"
+    rm -f /etc/systemd/system/${HY_SERVICE} /etc/systemd/system/multi-user.target.wants/${HY_SERVICE}
+    rm -f /usr/local/bin/hysteria 2>/dev/null || true
+    systemctl daemon-reload 2>/dev/null || true
+    echo -e "${GREEN}已完全卸载 Hysteria2${RESET}"
+}
+
+pause() { echo; read -r -p "按回车返回菜单..." _; }
+
+start_menu() {
+    while true; do
+        clear
+        echo " ================================================== "
+        echo "  Hysteria2 管理"
+        echo " ================================================== "
+        if is_installed; then
+            echo -e "  状态: ${GREEN}已安装${RESET}"
+        else
+            echo -e "  状态: ${YELLOW}未安装${RESET}"
+        fi
+        echo
+        echo "  1. 安装 / 重装"
+        echo "  2. 查看配置与链接"
+        echo "  3. 重启服务"
+        echo "  4. 更换密码"
+        echo "  5. 更换端口"
+        echo "  6. 完全卸载"
+        echo "  0. 退出"
+        echo
+        read -r -p "请输入数字: " num
+        case "$num" in
+            1) do_install; pause ;;
+            2) show_config; pause ;;
+            3) do_restart; pause ;;
+            4) change_password; pause ;;
+            5) change_port; pause ;;
+            6) uninstall_hy2; pause ;;
+            0) exit 0 ;;
+            *) echo "输入错误"; sleep 1 ;;
+        esac
+    done
+}
+
+case "${1:-}" in
+    uninstall|remove) uninstall_hy2; exit 0 ;;
+    show|view) show_config; exit 0 ;;
+    *) start_menu ;;
+esac
