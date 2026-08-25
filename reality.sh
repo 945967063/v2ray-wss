@@ -8,13 +8,14 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-SCRIPT_VERSION="1.2.3"
+SCRIPT_VERSION="1.2.4"
 CONFIG_DIR="/usr/local/etc/xray"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 CLIENT_FILE="${CONFIG_DIR}/reclient.json"
 STATE_FILE="${CONFIG_DIR}/reality.conf"
 LOG_FILE="/var/log/reality_install.log"
 BACKUP_DIR="/tmp/reality_backup_$(date +%s)"
+REPO_RAW="https://raw.githubusercontent.com/945967063/v2ray-wss/main"
 
 SERVER_IP=""
 SERVER_HOST=""
@@ -38,6 +39,25 @@ SNI_PRESETS=(
     "dl.google.com"
     "www.yahoo.com"
 )
+
+install_console_shortcut() {
+    local tmp="/tmp/sb.cli.$$"
+    mkdir -p /usr/local/lib/sb-menu
+    if wget --no-cache -q -O "$tmp" "${REPO_RAW}/sb" 2>/dev/null || curl -fsSL -o "$tmp" "${REPO_RAW}/sb" 2>/dev/null; then
+        install -m 755 "$tmp" /usr/local/bin/sb
+        ln -sfn /usr/local/bin/sb /usr/local/bin/ssrust
+        ln -sfn /usr/local/bin/sb /usr/local/bin/reality
+        ln -sfn /usr/local/bin/sb /usr/local/bin/hy2
+        rm -f /usr/local/bin/proxy
+        rm -rf /usr/local/lib/proxy-menu
+        cp -f "$0" /usr/local/lib/sb-menu/reality.sh 2>/dev/null || true
+        chmod +x /usr/local/lib/sb-menu/reality.sh 2>/dev/null || true
+        rm -f "$tmp"
+        print_green "快捷命令已就绪: 输入 sb 或 reality 打开管理菜单"
+    else
+        rm -f "$tmp"
+    fi
+}
 
 mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null
 touch "$LOG_FILE" 2>/dev/null || LOG_FILE=""
@@ -977,6 +997,8 @@ do_install() {
     display_green "安装已经完成"
     display_client_config
     show_qr_code || true
+    install_console_shortcut
+    display_yellow "以后可直接输入: sb  或  reality"
     log_only "Reality安装完成: $(date)"
 }
 
@@ -1006,6 +1028,7 @@ start_menu() {
         echo "  6. 更换 shortId"
         echo "  7. 启用 BBR"
         echo "  8. 完全卸载 Reality / Xray"
+        echo "  9. 安装控制台快捷命令 (sb/reality)"
         echo "  0. 退出"
         echo
         local num
@@ -1019,6 +1042,7 @@ start_menu() {
             6) change_short_id; pause_return ;;
             7) enable_bbr; pause_return ;;
             8) uninstall_reality; pause_return ;;
+            9) install_console_shortcut; pause_return ;;
             0) exit 0 ;;
             *) echo "请输入正确数字"; sleep 1 ;;
         esac

@@ -1,0 +1,160 @@
+#!/bin/bash
+# 控制台快捷命令: sb / ssrust / reality / hy2
+# forum: https://1024.day
+
+REPO_RAW="https://raw.githubusercontent.com/945967063/v2ray-wss/main"
+LIB_DIR="/usr/local/lib/sb-menu"
+BIN_SB="/usr/local/bin/sb"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+PLAIN='\033[0m'
+
+if [[ $EUID -ne 0 ]]; then
+    echo -e "${RED}请使用 root 运行: sudo $(basename "$0")${PLAIN}" 1>&2
+    exit 1
+fi
+
+ensure_lib() {
+    mkdir -p "$LIB_DIR"
+}
+
+fetch_script() {
+    local name="$1"
+    local dest="${LIB_DIR}/${name}"
+    if command -v wget >/dev/null 2>&1; then
+        wget --no-cache -q -O "$dest" "${REPO_RAW}/${name}" || return 1
+    else
+        curl -fsSL -o "$dest" "${REPO_RAW}/${name}" || return 1
+    fi
+    chmod +x "$dest"
+}
+
+run_script() {
+    local name="$1"
+    shift
+    ensure_lib
+    if [[ ! -f "${LIB_DIR}/${name}" ]]; then
+        echo -e "${CYAN}正在下载 ${name}...${PLAIN}"
+        fetch_script "$name" || {
+            echo -e "${RED}下载失败: ${name}${PLAIN}"
+            return 1
+        }
+    fi
+    bash "${LIB_DIR}/${name}" "$@"
+}
+
+update_scripts() {
+    ensure_lib
+    echo -e "${CYAN}更新本地管理脚本...${PLAIN}"
+    fetch_script "ss-rust.sh" || true
+    fetch_script "reality.sh" || true
+    fetch_script "hy2.sh" || true
+    local tmp="/tmp/sb.cli.$$"
+    if wget --no-cache -q -O "$tmp" "${REPO_RAW}/sb" || curl -fsSL -o "$tmp" "${REPO_RAW}/sb"; then
+        install -m 755 "$tmp" "$BIN_SB"
+        ln -sfn "$BIN_SB" /usr/local/bin/ssrust
+        ln -sfn "$BIN_SB" /usr/local/bin/reality
+        ln -sfn "$BIN_SB" /usr/local/bin/hy2
+        # 清理旧的 proxy 命令
+        rm -f /usr/local/bin/proxy
+        rm -rf /usr/local/lib/proxy-menu
+        rm -f "$tmp"
+        echo -e "${GREEN}快捷命令已更新${PLAIN}"
+    else
+        echo -e "${YELLOW}自身更新失败，子脚本可能已更新${PLAIN}"
+        rm -f "$tmp"
+    fi
+    echo -e "${GREEN}可用命令: sb | ssrust | reality | hy2${PLAIN}"
+}
+
+remove_cli() {
+    rm -f /usr/local/bin/sb /usr/local/bin/ssrust /usr/local/bin/reality /usr/local/bin/hy2 /usr/local/bin/proxy
+    rm -rf "$LIB_DIR" /usr/local/lib/proxy-menu
+    echo -e "${GREEN}已移除控制台快捷命令${PLAIN}"
+}
+
+show_menu() {
+    clear
+    echo " ================================================== "
+    echo "  代理管理快捷菜单  |  命令: sb"
+    echo "  https://1024.day"
+    echo " ================================================== "
+    echo
+    echo "  1. Shadowsocks-rust"
+    echo "  2. Reality"
+    echo "  3. Hysteria2"
+    echo "  4. 更新本地脚本"
+    echo "  5. 移除快捷命令"
+    echo "  0. 退出"
+    echo
+    read -r -p "请输入数字: " num
+    case "$num" in
+        1) run_script ss-rust.sh ;;
+        2) run_script reality.sh ;;
+        3) run_script hy2.sh ;;
+        4) update_scripts; echo; read -r -p "按回车继续..." _; show_menu ;;
+        5) remove_cli ;;
+        0) exit 0 ;;
+        *) echo "输入错误"; sleep 1; show_menu ;;
+    esac
+}
+
+invoke="$(basename "$0")"
+arg="${1:-}"
+
+case "$invoke" in
+    ssrust|ss-rust)
+        run_script ss-rust.sh "${@:1}"
+        exit $?
+        ;;
+    reality)
+        run_script reality.sh "${@:1}"
+        exit $?
+        ;;
+    hy2|hysteria|hysteria2)
+        run_script hy2.sh "${@:1}"
+        exit $?
+        ;;
+esac
+
+case "$arg" in
+    ss|ssr|ssrust|shadowsocks)
+        shift
+        run_script ss-rust.sh "$@"
+        ;;
+    reality|xray)
+        shift
+        run_script reality.sh "$@"
+        ;;
+    hy2|hysteria|hysteria2)
+        shift
+        run_script hy2.sh "$@"
+        ;;
+    update|--update)
+        update_scripts
+        ;;
+    remove-cli|uninstall-cli)
+        remove_cli
+        ;;
+    help|-h|--help)
+        echo "用法:"
+        echo "  sb              打开管理菜单"
+        echo "  sb ss           Shadowsocks-rust 管理"
+        echo "  sb reality      Reality 管理"
+        echo "  sb hy2          Hysteria2 管理"
+        echo "  sb update       更新本地脚本"
+        echo "  sb remove-cli   移除快捷命令"
+        echo
+        echo "快捷命令: ssrust | reality | hy2"
+        ;;
+    ""|menu)
+        show_menu
+        ;;
+    *)
+        echo "未知参数: $arg （sb help 查看帮助）"
+        exit 1
+        ;;
+esac

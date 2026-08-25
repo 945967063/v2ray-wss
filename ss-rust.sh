@@ -14,11 +14,31 @@ SS_CLIENT="${SS_DIR}/client.json"
 SS_STATE="${SS_DIR}/ss.conf"
 SS_SERVICE="shadowsocks.service"
 METHOD="aes-128-gcm"
+REPO_RAW="https://raw.githubusercontent.com/945967063/v2ray-wss/main"
 
 SS_PASSWORD=""
 SS_PORT=""
 IP=""
 
+install_console_shortcut() {
+    local tmp="/tmp/sb.cli.$$"
+    mkdir -p /usr/local/lib/sb-menu
+    if wget --no-cache -q -O "$tmp" "${REPO_RAW}/sb" 2>/dev/null || curl -fsSL -o "$tmp" "${REPO_RAW}/sb" 2>/dev/null; then
+        install -m 755 "$tmp" /usr/local/bin/sb
+        ln -sfn /usr/local/bin/sb /usr/local/bin/ssrust
+        ln -sfn /usr/local/bin/sb /usr/local/bin/reality
+        ln -sfn /usr/local/bin/sb /usr/local/bin/hy2
+        rm -f /usr/local/bin/proxy
+        rm -rf /usr/local/lib/proxy-menu
+        cp -f "$0" /usr/local/lib/sb-menu/ss-rust.sh 2>/dev/null || \
+            wget --no-cache -q -O /usr/local/lib/sb-menu/ss-rust.sh "${REPO_RAW}/ss-rust.sh" 2>/dev/null || true
+        chmod +x /usr/local/lib/sb-menu/ss-rust.sh 2>/dev/null || true
+        rm -f "$tmp"
+        echo -e "${GREEN}快捷命令已就绪: 输入 sb 或 ssrust 打开管理菜单${PLAIN}"
+    else
+        rm -f "$tmp"
+    fi
+}
 check_root() {
     if [[ $EUID -ne 0 ]]; then
         echo -e "${RED}错误: 必须以 root 运行${PLAIN}" 1>&2
@@ -204,9 +224,11 @@ do_install() {
     write_ss_config
     save_state
     save_client
+    install_console_shortcut
     clear
     echo -e "${GREEN}安装完成${PLAIN}"
     show_config
+    echo -e "${CYAN}以后可直接输入: sb  或  ssrust${PLAIN}"
 }
 
 do_restart() {
@@ -277,6 +299,7 @@ start_menu() {
         echo "  4. 更换密码"
         echo "  5. 更换端口"
         echo "  6. 完全卸载"
+        echo "  7. 安装控制台快捷命令 (sb/ssrust)"
         echo "  0. 退出"
         echo
         read -r -p "请输入数字: " num
@@ -287,6 +310,7 @@ start_menu() {
             4) change_password; pause ;;
             5) change_port; pause ;;
             6) uninstall_ss; pause ;;
+            7) install_console_shortcut; pause ;;
             0) exit 0 ;;
             *) echo "输入错误"; sleep 1 ;;
         esac

@@ -11,19 +11,26 @@ wget -O tcp-wss.sh https://raw.githubusercontent.com/945967063/v2ray-wss/main/tc
 1. Shadowsocks-rust（落地）
 2. Reality（xtls-rprx-vision）
 3. Hysteria2
+4. 安装控制台快捷命令
 
-进入后各自有子菜单：安装/重装、查看链接、重启、更换密码或 UUID、更换端口、完全卸载。
+## 控制台快捷命令
+
+安装后（或菜单选 4）可直接输入：
+
+```bash
+sb              # 打开总菜单
+sb ss           # Shadowsocks-rust
+sb reality      # Reality
+sb hy2          # Hysteria2
+```
+
+也可用：`ssrust` / `reality` / `hy2`
 
 ## 单独使用
 
 ```bash
-# Shadowsocks-rust
 wget --no-cache -O ss-rust.sh https://raw.githubusercontent.com/945967063/v2ray-wss/main/ss-rust.sh && bash ss-rust.sh
-
-# Reality
 wget --no-cache -O reality.sh https://raw.githubusercontent.com/945967063/v2ray-wss/main/reality.sh && bash reality.sh
-
-# Hysteria2
 wget --no-cache -O hy2.sh https://raw.githubusercontent.com/945967063/v2ray-wss/main/hy2.sh && bash hy2.sh
 ```
 
@@ -37,12 +44,10 @@ wget --no-cache -O hy2.sh https://raw.githubusercontent.com/945967063/v2ray-wss/
 
 ## 完全卸载
 
-在对应脚本菜单选「完全卸载」，或：
-
 ```bash
 bash ss-rust.sh uninstall
 bash reality.sh uninstall
 bash hy2.sh uninstall
 ```
 
-**提醒：** 连不上时先检查云安全组 / 本机防火墙是否放行对应端口（Hysteria2 为 UDP）。
+**提醒：** 连不上时先检查云安全组 / 本机防火墙（Hysteria2 为 UDP）。

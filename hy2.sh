@@ -14,11 +14,30 @@ HY_CLIENT="${HY_DIR}/hyclient.json"
 HY_STATE="${HY_DIR}/hy2.conf"
 HY_SERVICE="hysteria-server.service"
 SNI="bing.com"
+REPO_RAW="https://raw.githubusercontent.com/945967063/v2ray-wss/main"
 
 SERVER_PORT=""
 HYSTERIA_PASSWORD=""
 SERVER_IP=""
 
+install_console_shortcut() {
+    local tmp="/tmp/sb.cli.$$"
+    mkdir -p /usr/local/lib/sb-menu
+    if wget --no-cache -q -O "$tmp" "${REPO_RAW}/sb" 2>/dev/null || curl -fsSL -o "$tmp" "${REPO_RAW}/sb" 2>/dev/null; then
+        install -m 755 "$tmp" /usr/local/bin/sb
+        ln -sfn /usr/local/bin/sb /usr/local/bin/ssrust
+        ln -sfn /usr/local/bin/sb /usr/local/bin/reality
+        ln -sfn /usr/local/bin/sb /usr/local/bin/hy2
+        rm -f /usr/local/bin/proxy
+        rm -rf /usr/local/lib/proxy-menu
+        cp -f "$0" /usr/local/lib/sb-menu/hy2.sh 2>/dev/null || true
+        chmod +x /usr/local/lib/sb-menu/hy2.sh 2>/dev/null || true
+        rm -f "$tmp"
+        echo -e "${GREEN}快捷命令已就绪: 输入 sb 或 hy2${RESET}"
+    else
+        rm -f "$tmp"
+    fi
+}
 if [[ $EUID -ne 0 ]]; then
     echo -e "${RED}必须以 root 运行${RESET}" 1>&2
     exit 1
@@ -196,9 +215,11 @@ do_install() {
     sleep 2
     save_state
     save_client
+    install_console_shortcut
     clear
     echo -e "${GREEN}安装完成${RESET}"
     show_config
+    echo -e "${CYAN}以后可直接输入: sb  或  hy2${RESET}"
     systemctl status ${HY_SERVICE} --no-pager || true
 }
 
@@ -271,6 +292,7 @@ start_menu() {
         echo "  4. 更换密码"
         echo "  5. 更换端口"
         echo "  6. 完全卸载"
+        echo "  7. 安装控制台快捷命令 (sb/hy2)"
         echo "  0. 退出"
         echo
         read -r -p "请输入数字: " num
@@ -281,6 +303,7 @@ start_menu() {
             4) change_password; pause ;;
             5) change_port; pause ;;
             6) uninstall_hy2; pause ;;
+            7) install_console_shortcut; pause ;;
             0) exit 0 ;;
             *) echo "输入错误"; sleep 1 ;;
         esac
