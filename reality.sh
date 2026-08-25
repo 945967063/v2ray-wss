@@ -460,25 +460,33 @@ install_xray() {
         exit_with_error "下载Xray安装脚本失败"
     fi
     
-    # 运行安装脚本带错误处理
+    # 运行安装脚本：以二进制是否可用为准，忽略安装脚本非致命退出码
+    # （XTLS 安装脚本在「已安装但未运行」等情况下可能返回非 0，实际已安装成功）
     log_info "执行Xray安装脚本..."
-    if ! timeout 600 bash "$script_path" install; then
-        exit_with_error "Xray安装失败或超时"
+    local install_status=0
+    timeout 600 bash "$script_path" install || install_status=$?
+
+    if [[ $install_status -eq 124 ]]; then
+        exit_with_error "Xray安装超时"
     fi
-    
+
     # 验证Xray安装
     if [[ ! -f "/usr/local/bin/xray" ]] || [[ ! -x "/usr/local/bin/xray" ]]; then
-        exit_with_error "Xray安装验证失败"
+        exit_with_error "Xray安装失败：未找到可执行文件"
     fi
-    
+
     # 测试xray二进制文件
     if ! /usr/local/bin/xray version >/dev/null 2>&1; then
         exit_with_error "Xray二进制文件测试失败"
     fi
-    
+
+    if [[ $install_status -ne 0 ]]; then
+        print_yellow "警告: Xray安装脚本退出码为 $install_status，但已检测到可用的 Xray，继续配置..."
+    fi
+
     # 清理
     rm -f "$script_path"
-    
+
     print_green "Xray安装完成"
 }
 
