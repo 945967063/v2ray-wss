@@ -22,6 +22,8 @@ wget -O tcp-wss.sh https://raw.githubusercontent.com/945967063/v2ray-wss/main/tc
 wget -O reality.sh https://raw.githubusercontent.com/945967063/v2ray-wss/main/reality.sh && bash reality.sh
 ```
 
+安装后再次运行同一脚本可进入管理菜单：查看链接、二维码、重启、更换 UUID/shortId、启用 BBR、卸载等。
+
 **便宜VPS推荐：** https://hostalk.net/deals.html
 
 ![image](https://github.com/user-attachments/assets/be9783bb-88a2-477a-a8af-4ffc86323805)
