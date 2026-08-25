@@ -9,9 +9,13 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 # 全局变量定义
+SCRIPT_VERSION="1.1.0"
 SERVER_IP=""
+SERVER_HOST=""
+SHORT_ID=""
 LOG_FILE="/var/log/reality_install.log"
 BACKUP_DIR="/tmp/reality_backup_$(date +%s)"
+XRAY_WAS_ACTIVE_BEFORE=0
 
 # 创建日志目录
 mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null
@@ -68,16 +72,11 @@ exit_with_error() {
     exit 1
 }
 
-# 清理函数
+# 清理函数：只清临时文件，不停止可能已存在的 Xray 服务
 cleanup_on_error() {
     log_info "执行错误清理..."
-    if command_exists systemctl; then
-        systemctl stop xray.service 2>/dev/null || true
-    elif command_exists service; then
-        service xray stop 2>/dev/null || true
-    fi
-    rm -f /tmp/xray-install.sh
-    log_info "错误清理完成"
+    rm -f /tmp/xray-install.sh /tmp/xray_config_$$.json 2>/dev/null || true
+    log_info "错误清理完成（未停止现有 Xray 服务）"
 }
 
 # 信号陷阱
@@ -88,24 +87,75 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
-# 验证端口参数
+# 验证端口参数（仅返回状态，不退出）
 validate_port() {
     local port_to_check="$1"
     if [[ ! "$port_to_check" =~ ^[0-9]+$ ]] || [[ "$port_to_check" -lt 1 ]] || [[ "$port_to_check" -gt 65535 ]]; then
-        exit_with_error "端口号无效: $port_to_check (必须在1-65535之间)"
         return 1
     fi
     return 0
 }
 
-# 验证域名格式
+# 验证域名格式（仅返回状态，不退出）
 validate_domain() {
     local domain_to_check="$1"
     if [[ ! "$domain_to_check" =~ ^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$ ]]; then
-        exit_with_error "域名格式无效: $domain_to_check"
         return 1
     fi
     return 0
+}
+
+# 检查端口是否被占用
+is_port_in_use() {
+    local port="$1"
+    if command_exists ss; then
+        ss -tuln 2>/dev/null | grep -qE ":${port}[[:space:]]"
+        return $?
+    elif command_exists netstat; then
+        netstat -tuln 2>/dev/null | grep -qE ":${port}[[:space:]]"
+        return $?
+    fi
+    return 1
+}
+
+# IPv6 地址在 URL 中需要加方括号
+format_host_for_url() {
+    local ip="$1"
+    if [[ "$ip" == *:* ]]; then
+        echo "[${ip}]"
+    else
+        echo "$ip"
+    fi
+}
+
+# 生成 Reality shortId（8 位 hex）
+generate_short_id() {
+    local sid=""
+    if command_exists openssl; then
+        sid=$(openssl rand -hex 4 2>/dev/null || true)
+    fi
+    if [[ -z "$sid" || ${#sid} -ne 8 ]]; then
+        sid=$(head -c 4 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' | head -c 8)
+    fi
+    if [[ ! "$sid" =~ ^[0-9a-fA-F]{8}$ ]]; then
+        sid=$(printf '%04x%04x' "$RANDOM" "$RANDOM")
+    fi
+    echo "${sid,,}"
+}
+
+# 安装完成后提示防火墙放行
+show_firewall_hint() {
+    local port="$1"
+    echo
+    display_yellow "请确认已放行 TCP 端口 ${port}（云安全组 / 本机防火墙）："
+    if command_exists ufw && ufw status 2>/dev/null | grep -qi "active"; then
+        display_yellow "  ufw allow ${port}/tcp && ufw reload"
+    elif command_exists firewall-cmd && systemctl is-active --quiet firewalld 2>/dev/null; then
+        display_yellow "  firewall-cmd --permanent --add-port=${port}/tcp && firewall-cmd --reload"
+    else
+        display_yellow "  若使用 ufw: ufw allow ${port}/tcp && ufw reload"
+        display_yellow "  若使用 firewalld: firewall-cmd --permanent --add-port=${port}/tcp && firewall-cmd --reload"
+    fi
 }
 
 # 检测系统发行版
@@ -145,10 +195,15 @@ detect_package_manager() {
         PKG_MANAGER="apt"
         PKG_UPDATE="apt-get update -y"
         PKG_INSTALL="apt-get install -y"
-        # 检查dpkg是否被锁
+        # 检查dpkg是否被锁（最多等待 120 秒）
+        local lock_wait=0
         while fuser /var/lib/dpkg/lock >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || fuser /var/cache/apt/archives/lock >/dev/null 2>&1; do
-            log_info "等待dpkg锁释放..."
+            if [[ $lock_wait -ge 120 ]]; then
+                exit_with_error "等待 dpkg/apt 锁超时，请检查是否有其他 apt 进程正在运行"
+            fi
+            log_info "等待dpkg锁释放... (${lock_wait}s/120s)"
             sleep 3
+            lock_wait=$((lock_wait + 3))
         done
     elif command_exists yum; then
         PKG_MANAGER="yum"
@@ -297,7 +352,7 @@ check_service_manager() {
     log_info "检测到服务管理器: $SERVICE_MANAGER"
 }
 
-# 获取系统IP地址 - 重写为静默版本，只返回IP，不输出任何日志
+# 获取系统IP地址 - 静默版本，成功时输出IP并返回0，失败返回1（勿在此exit，避免子shell问题）
 get_server_ip_silent() {
     local server_ip=""
     local ip_sources=(
@@ -318,17 +373,16 @@ get_server_ip_silent() {
         
         # 验证IP地址格式
         if [[ "$server_ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-            # 验证IP地址范围
             local valid=true
+            local octet
             IFS='.' read -ra ADDR <<< "$server_ip"
-            for i in "${ADDR[@]}"; do
-                if [[ $i -gt 255 ]]; then
+            for octet in "${ADDR[@]}"; do
+                if [[ $octet -gt 255 ]]; then
                     valid=false
                     break
                 fi
             done
             if [[ "$valid" == "true" ]]; then
-                log_only "成功获取IPv4地址: $server_ip"
                 echo "$server_ip"
                 return 0
             fi
@@ -338,21 +392,17 @@ get_server_ip_silent() {
     done
     
     # 如果IPv4失败，尝试IPv6
-    log_only "尝试获取IPv6地址..."
     server_ip=$(curl -s -6 --connect-timeout 10 --max-time 15 "http://www.cloudflare.com/cdn-cgi/trace" 2>/dev/null | grep "ip=" | awk -F "=" '{print $2}' | tr -d '\r\n' || true)
     
-    # 基本IPv6验证
     if [[ "$server_ip" =~ ^[0-9a-fA-F:]+$ ]] && [[ "$server_ip" == *":"* ]]; then
-        log_only "成功获取IPv6地址: $server_ip"
         echo "$server_ip"
         return 0
     fi
     
-    exit_with_error "无法获取服务器IP地址，请检查网络连接"
     return 1
 }
 
-# 生成UUID
+# 生成UUID（成功输出UUID返回0，失败返回1）
 generate_uuid() {
     local uuid=""
     if [[ -r /proc/sys/kernel/random/uuid ]]; then
@@ -360,18 +410,15 @@ generate_uuid() {
     elif command_exists uuidgen; then
         uuid=$(uuidgen)
     else
-        # 回退到Python生成UUID
         uuid=$(python3 -c "import uuid; print(uuid.uuid4())" 2>/dev/null || \
-               python -c "import uuid; print(uuid.uuid4())" 2>/dev/null || \
-               exit_with_error "无法生成UUID，请安装uuidgen或python")
+               python -c "import uuid; print(uuid.uuid4())" 2>/dev/null || true)
     fi
     
-    # 验证UUID格式
-    if [[ ! "$uuid" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
-        exit_with_error "生成的UUID格式无效: $uuid"
+    if [[ ! "$uuid" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]]; then
+        return 1
     fi
     
-    echo "$uuid"
+    echo "${uuid,,}"
 }
 
 # 安装Xray
@@ -565,8 +612,7 @@ generate_keys() {
     fi
     
     print_green "密钥生成成功"
-    log_info "私钥: ${RE_PRIVATE_KEY:0:10}..."
-    log_info "公钥 (来源: $(echo "$raw" | grep -q "Password" && echo "Password字段" || echo "Public字段")): ${RE_PUBLIC_KEY:0:10}..."
+    log_only "密钥对已生成（不在日志中记录明文密钥）"
 }
 
 # 配置Xray
@@ -578,7 +624,7 @@ configure_xray() {
     chmod 755 /usr/local/etc/xray
     
     # 验证必要变量
-    local required_vars=("PORT_NUMBER" "UUID" "SERVER_SNI" "RE_PRIVATE_KEY")
+    local required_vars=("PORT_NUMBER" "UUID" "SERVER_SNI" "RE_PRIVATE_KEY" "SHORT_ID")
     for var in "${required_vars[@]}"; do
         if [[ -z "${!var}" ]]; then
             exit_with_error "必要变量 $var 未设置"
@@ -624,7 +670,7 @@ cat > "$temp_config" <<EOF
                     "maxClientVer": "",
                     "maxTimeDiff": 0,
                     "shortIds": [
-                        "88"
+                        "$SHORT_ID"
                     ]
                 }
             }
@@ -645,7 +691,7 @@ EOF
     
     # 移动到最终位置
     mv "$temp_config" /usr/local/etc/xray/config.json
-    chmod 644 /usr/local/etc/xray/config.json
+    chmod 600 /usr/local/etc/xray/config.json
     
     # 测试配置
     log_info "验证Xray配置..."
@@ -705,12 +751,6 @@ EOF
     
     # 生成客户端配置
     generate_client_config
-    
-    # 清理安装文件
-    log_info "清理安装文件..."
-    rm -f tcp-wss.sh install-release.sh reality.sh
-    
-    clear
 }
 
 # 生成客户端配置
@@ -718,30 +758,31 @@ generate_client_config() {
     log_info "生成客户端配置..."
     
     # 验证所有必要参数
-    if [[ -z "$SERVER_IP" || -z "$PORT_NUMBER" || -z "$UUID" || -z "$RE_PUBLIC_KEY" || -z "$SERVER_SNI" ]]; then
+    if [[ -z "$SERVER_IP" || -z "$PORT_NUMBER" || -z "$UUID" || -z "$RE_PUBLIC_KEY" || -z "$SERVER_SNI" || -z "$SHORT_ID" ]]; then
         exit_with_error "生成客户端配置时缺少必要参数"
     fi
+
+    SERVER_HOST=$(format_host_for_url "$SERVER_IP")
+    local share_link="vless://${UUID}@${SERVER_HOST}:${PORT_NUMBER}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${SERVER_SNI}&fp=chrome&pbk=${RE_PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none#1024-reality"
     
-    # 生成客户端配置文件
     cat > /usr/local/etc/xray/reclient.json <<EOF
 {
-"配置参数": {
-    "代理模式": "vless",
-    "地址": "$SERVER_IP",
-    "端口": $PORT_NUMBER,
-    "UUID": "$UUID",
-    "流控": "xtls-rprx-vision", 
-    "传输协议": "tcp",
-    "公钥": "$RE_PUBLIC_KEY",
-    "底层传输": "reality",
-    "SNI": "$SERVER_SNI",
-    "shortIds": "88"
-},
-"连接链接": "vless://$UUID@$SERVER_IP:$PORT_NUMBER?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$SERVER_SNI&fp=chrome&pbk=$RE_PUBLIC_KEY&sid=88&type=tcp&headerType=none#1024-reality"
+  "proxy": "vless",
+  "address": "$SERVER_IP",
+  "port": $PORT_NUMBER,
+  "uuid": "$UUID",
+  "flow": "xtls-rprx-vision",
+  "network": "tcp",
+  "publicKey": "$RE_PUBLIC_KEY",
+  "security": "reality",
+  "sni": "$SERVER_SNI",
+  "shortId": "$SHORT_ID",
+  "shareLink": "$share_link"
 }
 EOF
     
-    chmod 644 /usr/local/etc/xray/reclient.json
+    chmod 600 /usr/local/etc/xray/reclient.json
+    SHARE_LINK="$share_link"
     log_info "客户端配置已保存到: /usr/local/etc/xray/reclient.json"
 }
 
@@ -756,7 +797,7 @@ display_xray_status() {
     fi
 }
 
-# 显示客户端配置 - 完全干净版本，无日志输出
+# 显示客户端配置
 display_client_config() {
     echo
     display_green "安装已经完成"
@@ -771,57 +812,63 @@ display_client_config() {
     echo "Public key：$RE_PUBLIC_KEY"
     echo "底层传输：reality"
     echo "SNI：$SERVER_SNI"
-    echo "shortIds：88"
+    echo "shortIds：$SHORT_ID"
     display_green "========================================"
     echo
     display_green "客户端连接链接："
-    echo "vless://$UUID@$SERVER_IP:$PORT_NUMBER?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$SERVER_SNI&fp=chrome&pbk=$RE_PUBLIC_KEY&sid=88&type=tcp&headerType=none#1024-reality"
+    echo "${SHARE_LINK}"
     echo
     display_green "配置信息已保存到: /usr/local/etc/xray/reclient.json"
     if [[ -n "$LOG_FILE" ]]; then
         display_green "安装日志文件位置: $LOG_FILE"
     fi
+    show_firewall_hint "$PORT_NUMBER"
 }
 
 # 获取用户输入
 get_user_input() {
     log_info "获取用户配置参数..."
     
-    # 生成UUID
-    UUID=$(generate_uuid)
+    UUID=$(generate_uuid) || exit_with_error "无法生成UUID，请安装uuidgen或python"
     log_info "已生成UUID: $UUID"
+
+    SHORT_ID=$(generate_short_id) || exit_with_error "无法生成 shortId"
+    log_info "已生成 shortId: $SHORT_ID"
     
-    # 获取端口号
     local port_input
-    read -r -t 15 -p "回车或等待15秒为默认端口443，或者自定义端口请输入(1-65535)："  port_input
+    read -r -t 15 -p "回车或等待15秒为默认端口443，或者自定义端口请输入(1-65535)："  port_input || true
     if [[ -z "$port_input" ]]; then
         PORT_NUMBER=443
         echo ""
+    elif validate_port "$port_input"; then
+        PORT_NUMBER="$port_input"
     else
-        if ! validate_port "$port_input"; then
-            PORT_NUMBER=443
-            print_yellow "端口号无效，使用默认端口443"
+        PORT_NUMBER=443
+        print_yellow "端口号无效，使用默认端口443"
+    fi
+
+    if is_port_in_use "$PORT_NUMBER"; then
+        if command_exists ss && ss -tulnp 2>/dev/null | grep -E ":${PORT_NUMBER}[[:space:]]" | grep -q xray; then
+            print_yellow "端口 ${PORT_NUMBER} 当前由 Xray 占用，将在配置后重启服务"
         else
-            PORT_NUMBER="$port_input"
+            exit_with_error "端口 ${PORT_NUMBER} 已被占用，请更换端口后重试"
         fi
     fi
     log_info "使用端口: $PORT_NUMBER"
     
     echo
     
-    # 获取SNI
     local sni_input
-    read -r -t 30 -p "回车或等待30秒为默认域名 www.amazon.com，或者自定义SNI请输入："  sni_input
+    read -r -t 30 -p "回车或等待30秒为默认域名 www.amazon.com，或者自定义SNI请输入："  sni_input || true
     if [[ -z "$sni_input" ]]; then
         SERVER_SNI="www.amazon.com"
         echo ""
+    elif validate_domain "$sni_input"; then
+        SERVER_SNI="$sni_input"
+        print_yellow "提示: 请确保该 SNI 目标支持 TLS1.3/HTTP2，否则可能无法正常连接"
     else
-        if ! validate_domain "$sni_input"; then
-            SERVER_SNI="www.amazon.com"
-            print_yellow "域名格式无效，使用默认域名www.amazon.com"
-        else
-            SERVER_SNI="$sni_input"
-        fi
+        SERVER_SNI="www.amazon.com"
+        print_yellow "域名格式无效，使用默认域名 www.amazon.com"
     fi
     log_info "使用SNI: $SERVER_SNI"
 }
@@ -829,34 +876,32 @@ get_user_input() {
 # 主函数
 main() {
     log_info "开始Reality安装和配置..."
-    log_info "脚本版本: Reality Plus $(date)"
+    log_info "脚本版本: Reality Plus v${SCRIPT_VERSION}"
     
-    # 初始化系统
     detect_distribution
     detect_package_manager
     check_service_manager
+
+    if command_exists systemctl && systemctl is-active --quiet xray.service 2>/dev/null; then
+        XRAY_WAS_ACTIVE_BEFORE=1
+        log_info "检测到已有运行中的 Xray 服务，安装失败时不会强制停止它"
+    fi
     
-    # 获取用户输入
     get_user_input
     
-    # 获取服务器IP - 静默获取IP，不在屏幕输出任何日志
     log_only "尝试获取服务器IP地址..."
-    SERVER_IP=$(get_server_ip_silent)
+    if ! SERVER_IP=$(get_server_ip_silent); then
+        exit_with_error "无法获取服务器IP地址，请检查网络连接"
+    fi
+    SERVER_HOST=$(format_host_for_url "$SERVER_IP")
     log_only "服务器IP地址: $SERVER_IP"
     
-    # 安装Xray
     install_xray
-    
-    # 生成密钥
     generate_keys
-    
-    # 配置并启动服务
     configure_xray
-    
-    # 显示配置 - 使用无日志输出版本
+
+    clear
     display_client_config
-    
-    # 显示服务状态
     display_xray_status
     
     log_only "Reality安装完成！"

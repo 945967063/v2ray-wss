@@ -1,4 +1,4 @@
-##!/bin/sh
+#!/bin/bash
 # forum: https://1024.day
 
 if [[ $EUID -ne 0 ]]; then
@@ -7,8 +7,8 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-timedatectl set-timezone Asia/Shanghai
-v2path=$(cat /dev/urandom | head -1 | md5sum | head -c 6)
+timedatectl set-timezone Asia/Shanghai 2>/dev/null || true
+v2path=$(head -c 16 /dev/urandom | md5sum | head -c 6)
 v2uuid=$(cat /proc/sys/kernel/random/uuid)
 ssport=$(shuf -i 2000-65000 -n 1)
 
@@ -23,38 +23,46 @@ getIP(){
 
 install_precheck(){
     echo "====输入已经DNS解析好的域名===="
-    read domain
+    read -r domain
 
-    read -t 15 -p "回车或等待15秒为默认端口443，或者自定义端口请输入(1-65535)："  getPort
-    if [ -z $getPort ];then
+    read -r -t 15 -p "回车或等待15秒为默认端口443，或者自定义端口请输入(1-65535)："  getPort || true
+    if [[ -z "$getPort" ]]; then
+        getPort=443
+    fi
+
+    if ! [[ "$getPort" =~ ^[0-9]+$ ]] || [[ "$getPort" -lt 1 || "$getPort" -gt 65535 ]]; then
+        echo "端口无效，使用默认 443"
         getPort=443
     fi
     
-    if [ -f "/usr/bin/apt-get" ]; then
-        apt-get update -y && apt-get upgrade -y
+    if [[ -f "/usr/bin/apt-get" ]]; then
+        apt-get update -y
         apt-get install -y net-tools curl
     else
-        yum update -y && yum upgrade -y
         yum install -y epel-release
         yum install -y net-tools curl
     fi
 
     sleep 3
-    isPort=`netstat -ntlp| grep -E ':80 |:443 '`
-    if [ "$isPort" != "" ];then
+    local check_ports=":80 |:443 "
+    if [[ "$getPort" != "443" && "$getPort" != "80" ]]; then
+        check_ports="${check_ports}|:${getPort} "
+    fi
+    isPort=$(netstat -ntlp 2>/dev/null | grep -E "$check_ports" || true)
+    if [[ -n "$isPort" ]]; then
         clear
         echo " ================================================== "
-        echo " 80或443端口被占用，请先释放端口再运行此脚本"
+        echo " 80/443/自定义端口被占用，请先释放端口再运行此脚本"
         echo
         echo " 端口占用信息如下："
-        echo $isPort
+        echo "$isPort"
         echo " ================================================== "
         exit 1
     fi
 }
 
 install_nginx(){
-    if [ -f "/usr/bin/apt-get" ];then
+    if [[ -f "/usr/bin/apt-get" ]]; then
         apt-get install -y nginx cron socat
     else
         yum install -y nginx cronie socat
@@ -94,7 +102,7 @@ http {
         listen $getPort ssl http2;
         listen [::]:$getPort ssl http2;
         server_name $domain;
-        ssl_protocols TLSv1.1 TLSv1.2 TLSv1.3;
+        ssl_protocols TLSv1.2 TLSv1.3;
         ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:HIGH:!aNULL:!MD5:!RC4:!DHE;
         ssl_prefer_server_ciphers on;
         ssl_certificate /etc/letsencrypt/live/$domain/fullchain.pem;
@@ -117,7 +125,7 @@ EOF
 }
 
 acme_ssl(){    
-    curl https://get.acme.sh | sh -s email=my@example.com
+    curl https://get.acme.sh | sh -s email=admin@${domain}
     mkdir -p /etc/letsencrypt/live/$domain
     ~/.acme.sh/acme.sh --issue -d $domain --standalone --keylength ec-256 --pre-hook "systemctl stop nginx" --post-hook "~/.acme.sh/acme.sh --installcert -d $domain --ecc --fullchain-file /etc/letsencrypt/live/$domain/fullchain.pem --key-file /etc/letsencrypt/live/$domain/privkey.pem --reloadcmd \"systemctl start nginx\""
 }
@@ -156,7 +164,6 @@ cat >/usr/local/etc/v2ray/config.json<<EOF
 EOF
 
     systemctl enable v2ray.service && systemctl restart v2ray.service && systemctl restart nginx.service
-    rm -f tcp-wss.sh install-release.sh
 
 cat >/usr/local/etc/v2ray/client.json<<EOF
 {
@@ -213,6 +220,7 @@ client_v2ray(){
     echo "===================================="
     echo "vmess://${wslink}"
     echo
+    echo "请确认已放行 TCP 80/${getPort}（云安全组 / 本机防火墙）"
 }
 
 start_menu(){
@@ -230,7 +238,7 @@ start_menu(){
     echo " 5. 安装 Https正向代理"
     echo " 0. 退出脚本"
     echo
-    read -p "请输入数字:" num
+    read -r -p "请输入数字:" num
     case "$num" in
     1)
     install_ssrust
@@ -252,7 +260,7 @@ start_menu(){
     install_https
     ;;
     0)
-    exit 1
+    exit 0
     ;;
     *)
     clear
