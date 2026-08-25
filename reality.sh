@@ -8,7 +8,7 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.2.1"
 CONFIG_DIR="/usr/local/etc/xray"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 CLIENT_FILE="${CONFIG_DIR}/reclient.json"
@@ -437,6 +437,33 @@ EOF
     chmod 600 "$CLIENT_FILE"
 }
 
+# Xray 默认以 nobody 运行，config.json 必须对其可读（600/root 会导致 permission denied / status=23）
+fix_xray_config_perms() {
+    mkdir -p "$CONFIG_DIR"
+    chmod 755 "$CONFIG_DIR"
+
+    local svc_user="nobody"
+    local svc_group="nogroup"
+    if getent group nobody >/dev/null 2>&1; then
+        svc_group="nobody"
+    elif getent group nogroup >/dev/null 2>&1; then
+        svc_group="nogroup"
+    else
+        svc_group="root"
+    fi
+
+    if id "$svc_user" >/dev/null 2>&1; then
+        chown "root:${svc_group}" "$CONFIG_FILE" 2>/dev/null || chown root:root "$CONFIG_FILE" 2>/dev/null || true
+        chmod 640 "$CONFIG_FILE"
+        # 若 group 仍读不到，回退 644 保证服务能启动
+        if ! su -s /bin/sh "$svc_user" -c "test -r '$CONFIG_FILE'" 2>/dev/null; then
+            chmod 644 "$CONFIG_FILE"
+        fi
+    else
+        chmod 644 "$CONFIG_FILE"
+    fi
+}
+
 write_xray_config() {
     local temp_config="/tmp/xray_config_$$.json"
     local filter_block=""
@@ -508,7 +535,7 @@ FILTER
 }
 EOF
     mv "$temp_config" "$CONFIG_FILE"
-    chmod 600 "$CONFIG_FILE"
+    fix_xray_config_perms
 
     if ! /usr/local/bin/xray run -test -config "$CONFIG_FILE" >/dev/null 2>&1; then
         # 旧版核心可能不认识 target / limitFallback，回退精简配置
@@ -542,7 +569,7 @@ EOF
 }
 EOF
         mv "$temp_config" "$CONFIG_FILE"
-        chmod 600 "$CONFIG_FILE"
+        fix_xray_config_perms
         if ! /usr/local/bin/xray run -test -config "$CONFIG_FILE" >/dev/null 2>&1; then
             exit_with_error "Xray配置验证失败"
         fi
