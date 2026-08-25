@@ -19,7 +19,7 @@ wget -O tcp-wss.sh https://raw.githubusercontent.com/945967063/v2ray-wss/main/tc
 ## 单独安装 Reality
 
 ```bash
-wget -O reality.sh https://raw.githubusercontent.com/945967063/v2ray-wss/main/reality.sh && bash reality.sh
+wget --no-cache -O reality.sh https://raw.githubusercontent.com/945967063/v2ray-wss/main/reality.sh && bash reality.sh
 ```
 
 安装后再次运行同一脚本可进入管理菜单：查看链接、二维码、重启、更换 UUID/shortId、启用 BBR、卸载等。

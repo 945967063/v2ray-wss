@@ -8,7 +8,7 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-SCRIPT_VERSION="1.2.1"
+SCRIPT_VERSION="1.2.2"
 CONFIG_DIR="/usr/local/etc/xray"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 CLIENT_FILE="${CONFIG_DIR}/reclient.json"
@@ -437,30 +437,68 @@ EOF
     chmod 600 "$CLIENT_FILE"
 }
 
-# Xray 默认以 nobody 运行，config.json 必须对其可读（600/root 会导致 permission denied / status=23）
+# Xray 默认以 nobody 运行，必须保证配置目录可进入、config.json 可读取
 fix_xray_config_perms() {
-    mkdir -p "$CONFIG_DIR"
-    chmod 755 "$CONFIG_DIR"
+    mkdir -p "$CONFIG_DIR" /usr/local/share/xray
+    # 确保路径可遍历（过严的 umask/权限会导致 nobody permission denied）
+    chmod 755 /usr/local /usr/local/etc /usr/local/share "$CONFIG_DIR" /usr/local/share/xray 2>/dev/null || true
+    chmod 644 /usr/local/share/xray/*.dat 2>/dev/null || true
 
-    local svc_user="nobody"
-    local svc_group="nogroup"
-    if getent group nobody >/dev/null 2>&1; then
-        svc_group="nobody"
-    elif getent group nogroup >/dev/null 2>&1; then
-        svc_group="nogroup"
-    else
-        svc_group="root"
+    if [[ -f "$CONFIG_FILE" ]]; then
+        chown root:root "$CONFIG_FILE" 2>/dev/null || true
+        # 直接 644：避免 600/640 导致 nobody 读配置失败 (status=23)
+        chmod 644 "$CONFIG_FILE"
+        log_info "已设置配置权限: $(ls -l "$CONFIG_FILE" 2>/dev/null | awk '{print $1,$3,$4,$9}')"
     fi
+}
 
-    if id "$svc_user" >/dev/null 2>&1; then
-        chown "root:${svc_group}" "$CONFIG_FILE" 2>/dev/null || chown root:root "$CONFIG_FILE" 2>/dev/null || true
-        chmod 640 "$CONFIG_FILE"
-        # 若 group 仍读不到，回退 644 保证服务能启动
-        if ! su -s /bin/sh "$svc_user" -c "test -r '$CONFIG_FILE'" 2>/dev/null; then
-            chmod 644 "$CONFIG_FILE"
+# 若 nobody 仍无法读配置，则添加 drop-in 改为 root 运行
+ensure_xray_runtime_access() {
+    fix_xray_config_perms
+
+    local can_read=0
+    if id nobody >/dev/null 2>&1; then
+        if command_exists runuser && runuser -u nobody -- test -r "$CONFIG_FILE" 2>/dev/null; then
+            can_read=1
+        elif su -s /bin/sh nobody -c "test -r '$CONFIG_FILE'" 2>/dev/null; then
+            can_read=1
         fi
     else
-        chmod 644 "$CONFIG_FILE"
+        can_read=1
+    fi
+
+    if [[ $can_read -eq 1 ]]; then
+        return 0
+    fi
+
+    print_yellow "nobody 无法读取 $CONFIG_FILE，将改用 root 运行 Xray 服务"
+    mkdir -p /etc/systemd/system/xray.service.d
+    cat > /etc/systemd/system/xray.service.d/99-reality-run-as-root.conf <<EOF
+[Service]
+User=root
+EOF
+    systemctl daemon-reload
+}
+
+restart_xray_service() {
+    if [[ "$SERVICE_MANAGER" == "systemctl" ]]; then
+        systemctl daemon-reload 2>/dev/null || true
+        systemctl enable xray.service 2>/dev/null || true
+        systemctl restart xray.service || return 1
+        sleep 2
+        systemctl is-active --quiet xray.service
+    else
+        service xray restart
+    fi
+}
+
+diagnose_xray_failure() {
+    print_red "Xray 启动失败诊断:"
+    ls -ld /usr/local /usr/local/etc "$CONFIG_DIR" 2>/dev/null || true
+    ls -l "$CONFIG_FILE" 2>/dev/null || true
+    if [[ "$SERVICE_MANAGER" == "systemctl" ]]; then
+        journalctl -u xray.service --no-pager -n 30 || true
+        systemctl status xray.service --no-pager || true
     fi
 }
 
@@ -573,18 +611,6 @@ EOF
         if ! /usr/local/bin/xray run -test -config "$CONFIG_FILE" >/dev/null 2>&1; then
             exit_with_error "Xray配置验证失败"
         fi
-    fi
-}
-
-restart_xray_service() {
-    if [[ "$SERVICE_MANAGER" == "systemctl" ]]; then
-        systemctl daemon-reload 2>/dev/null || true
-        systemctl enable xray.service 2>/dev/null || true
-        systemctl restart xray.service || return 1
-        sleep 2
-        systemctl is-active --quiet xray.service
-    else
-        service xray restart
     fi
 }
 
@@ -806,6 +832,7 @@ apply_config_changes() {
     write_xray_config
     save_state
     save_client_file
+    ensure_xray_runtime_access
     restart_xray_service || exit_with_error "配置已写入但服务重启失败"
     print_green "配置已更新"
     display_client_config
@@ -861,10 +888,24 @@ configure_and_start() {
     write_xray_config
     save_state
     save_client_file
+    ensure_xray_runtime_access
+
     if ! restart_xray_service; then
-        print_red "Xray服务启动失败"
-        [[ "$SERVICE_MANAGER" == "systemctl" ]] && systemctl status xray.service --no-pager || true
-        exit_with_error "启动Xray服务失败"
+        print_yellow "首次启动失败，再次修复权限并重试..."
+        ensure_xray_runtime_access
+        # 强制 root 运行兜底
+        if [[ "$SERVICE_MANAGER" == "systemctl" ]]; then
+            mkdir -p /etc/systemd/system/xray.service.d
+            cat > /etc/systemd/system/xray.service.d/99-reality-run-as-root.conf <<EOF
+[Service]
+User=root
+EOF
+            systemctl daemon-reload
+        fi
+        if ! restart_xray_service; then
+            diagnose_xray_failure
+            exit_with_error "启动Xray服务失败"
+        fi
     fi
     print_green "Xray服务启动成功"
 }
